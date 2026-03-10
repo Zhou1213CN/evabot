@@ -74,6 +74,9 @@ class ButlerService:
                     self.gateway.handle(error_response) # 直接发回用户，告知错误
                     log_event(logger, "PROCESS_ERROR", error=str(e), level=40)
                 finally:
+                    # [新增] 循环执行完毕或抛出异常后，当前 Context 状态已稳定，将所有消息标记为已处理
+                    ctx.ack_all_messages()
+                    self.gateway.store.set(Component.BUTLER, ctx, ctx.owner_id)
                     # 标记任务完成（对队列计数很重要）
                     self.queue.task_done()
                     self.gateway.finish_running(Component.BUTLER, ctx.owner_id, ctx)
@@ -89,123 +92,139 @@ class ButlerService:
         2. 调用 LLM (传入 ctx 和 system_prompt)
         3. 路由结果
         """
-
-        # B) 调用 LLM (Stateless call based on Context)
-        response_msg = call_llm(
-            ctx=ctx,
-            system_prompt=self._system_prompt,
-            tools=self._tools_schema     
-            )
-
-        # C) 结果解析与路由
+        iteration = 0
+        max_iterations = 20  # 设置最大循环阈值，防止死循环
         
-        # 情况 1: 触发工具
-        if response_msg.data and response_msg.data.get("tool_calls"):
-            # 看有没有需要给用户说的内容
-            if response_msg.content:
+        while iteration < max_iterations:
+            iteration += 1
+            # B) 调用 LLM (Stateless call based on Context)
+            response_msg = call_llm(
+                ctx=ctx,
+                system_prompt=self._system_prompt,
+                tools=self._tools_schema     
+                )
+
+            # C) 结果解析与路由
+            
+            # 情况 1: 触发工具
+            if response_msg.data and response_msg.data.get("tool_calls"):
+                # 看有没有需要给用户说的内容
+                if response_msg.content:
+                    user_msg = Message(
+                        message_role=MessageRole.ASSISTANT,
+                        sender=Component.BUTLER,
+                        sender_id=ctx.owner_id,
+                        send_type=SendType.USER,                          
+                        content=response_msg.content,
+                        data=response_msg.data
+                    )
+                    self.gateway.handle(user_msg)
+                else:
+                    ctx.add_packet(response_msg) 
+                # 补齐内部流转的必要字段再写入上下文
+                response_msg.sender_id = ctx.owner_id
+                response_msg.send_type = SendType.SELF
+                
+                for tc in response_msg.data["tool_calls"]:
+                    func = tc.get("function", {})
+                    tool_name = func.get("name")
+                    args_str = func.get("arguments", "{}")
+                    tool_call_id = tc.get("id")
+                    args_dict = extract_json(args_str)
+
+                    if tool_name == 'communicate_with_downstream':
+                        provide_info = args_dict.get("provide_info")
+                        target_tool_call_id = args_dict.get("tool_call_id") 
+                        receiver_id = self.gateway.task_manager.find_receiver_by_tool_call_id(target_tool_call_id)
+                        
+                        if provide_info and receiver_id:
+                            # 直接使用 DOWNWARD 让 Gateway 基于 Task 树找 Solver
+                            info_msg = Message(
+                                message_type=MessageType.EXTRA,
+                                sender=Component.BUTLER,
+                                sender_id=ctx.owner_id,
+                                send_type=SendType.DOWNWARD,          
+                                content=f'【系统通知：收到来自上游的最新补充信息】: {provide_info}',
+                                receiver_id=receiver_id
+                            )
+                            self.gateway.handle(info_msg)
+                            
+                            ctx.add_packet(Message(
+                                sender=Component.BUTLER,
+                                sender_id=ctx.owner_id,
+                                send_type=SendType.SELF,
+                                content='已收到信息',
+                                message_role=MessageRole.TOOL,
+                                tool_call_id=tool_call_id
+                            ))
+                        else:
+                            retry_msg = Message(
+                                sender=Component.BUTLER,
+                                sender_id=ctx.owner_id,
+                                send_type=SendType.SELF,
+                                content='信息发送失败，请检查提供的信息后重试。',
+                                message_role=MessageRole.TOOL,
+                                tool_call_id=tool_call_id                                    
+                            )
+                            ctx.add_packet(retry_msg)
+
+                    elif tool_name == 'call_solver':
+                        trigger_data = SolverTrigger(**args_dict)
+
+                        solver_msg = Message(
+                            sender=Component.BUTLER,
+                            sender_id=ctx.owner_id,
+                            send_type=SendType.DOWNWARD,              # 新建下发任务
+                            content=trigger_data.intent,
+                            tool_call_id=tool_call_id,
+                            data={"permission_type": trigger_data.auth_level}
+                        )
+                        result = self.gateway.handle(solver_msg)
+                        if result.status == 'OK':
+                            tool_ack_msg = Message(
+                                sender=Component.BUTLER,
+                                sender_id=ctx.owner_id,
+                                send_type=SendType.SELF,
+                                content='任务已发布，正在处理...',
+                                tool_call_id=tool_call_id,
+                                message_role=MessageRole.TOOL
+                            )
+                        else:
+                            tool_ack_msg = Message(
+                                sender=Component.BUTLER,
+                                sender_id=ctx.owner_id,
+                                send_type=SendType.SELF,
+                                content=result.reason,
+                                tool_call_id=tool_call_id,
+                                message_role=MessageRole.TOOL
+                            )
+                        ctx.add_packet(tool_ack_msg)
+                    else:
+                        if tool_name == 'edit_file':
+                            args_dict["path"] = os.path.join(os.path.dirname(__file__),'soul.md')
+                        result = execute_tool(tool_name, args_dict)
+                        tool_message = Message(
+                            sender=Component.BUTLER,
+                            sender_id=ctx.owner_id,
+                            send_type=SendType.SELF,
+                            content=result,
+                            data={"tool_name": tool_name, "args_str": args_str},
+                            tool_call_id=tool_call_id,
+                            message_role=MessageRole.TOOL
+                        )
+                        ctx.add_packet(tool_message)
+
+            # 情况 2: 普通回复 -> 发给 User
+            else:
                 user_msg = Message(
                     message_role=MessageRole.ASSISTANT,
                     sender=Component.BUTLER,
                     sender_id=ctx.owner_id,
                     send_type=SendType.USER,                          
-                    content=response_msg.content,
-                    data=response_msg.data
+                    content=response_msg.content
                 )
                 self.gateway.handle(user_msg)
-            else:
-                ctx.add_packet(response_msg) 
-            # 补齐内部流转的必要字段再写入上下文
-            response_msg.sender_id = ctx.owner_id
-            response_msg.send_type = SendType.SELF
-            
-            for tc in response_msg.data["tool_calls"]:
-                func = tc.get("function", {})
-                tool_name = func.get("name")
-                args_str = func.get("arguments", "{}")
-                tool_call_id = tc.get("id")
-                args_dict = extract_json(args_str)
+                return  # 没有工具调用了，结束循环
 
-                if tool_name == 'communicate_with_downstream':
-                    provide_info = args_dict.get("provide_info")
-                    target_tool_call_id = args_dict.get("tool_call_id") 
-                    receiver_id = self.gateway.task_manager.find_receiver_by_tool_call_id(target_tool_call_id)
-                    
-                    if provide_info and receiver_id:
-                        # 直接使用 DOWNWARD 让 Gateway 基于 Task 树找 Solver
-                        info_msg = Message(
-                            message_type=MessageType.EXTRA,
-                            sender=Component.BUTLER,
-                            sender_id=ctx.owner_id,
-                            send_type=SendType.DOWNWARD,          
-                            content=f'【系统通知：收到来自上游的最新补充信息】: {provide_info}',
-                            receiver_id=receiver_id
-                        )
-                        self.gateway.handle(info_msg)
-                        
-                        ctx.add_packet(Message(
-                            sender=Component.BUTLER,
-                            sender_id=ctx.owner_id,
-                            send_type=SendType.SELF,
-                            content='已收到信息',
-                            message_role=MessageRole.TOOL,
-                            tool_call_id=tool_call_id
-                        ))
-                    else:
-                        retry_msg = Message(
-                            sender=Component.BUTLER,
-                            sender_id=ctx.owner_id,
-                            send_type=SendType.SELF,
-                            content='信息发送失败，请检查提供的信息后重试。',
-                            message_role=MessageRole.TOOL,
-                            tool_call_id=tool_call_id                                    
-                        )
-                        ctx.add_packet(retry_msg)
-                        self._process_context(ctx)
-
-                elif tool_name == 'call_solver':
-                    trigger_data = SolverTrigger(**args_dict)
-
-                    solver_msg = Message(
-                        sender=Component.BUTLER,
-                        sender_id=ctx.owner_id,
-                        send_type=SendType.DOWNWARD,              # 新建下发任务
-                        content=trigger_data.intent,
-                        tool_call_id=tool_call_id,
-                        data={"permission_type": trigger_data.auth_level}
-                    )
-                    self.gateway.handle(solver_msg)
-                    
-                    tool_ack_msg = Message(
-                        sender=Component.BUTLER,
-                        sender_id=ctx.owner_id,
-                        send_type=SendType.SELF,
-                        content='任务已发布，正在处理...',
-                        tool_call_id=tool_call_id,
-                        message_role=MessageRole.TOOL
-                    )
-                    ctx.add_packet(tool_ack_msg)
-                else:
-                    if tool_name == 'edit_file':
-                        args_dict["path"] = os.path.join(os.path.dirname(__file__),'soul.md')
-                    result = execute_tool(tool_name, args_dict)
-                    tool_message = Message(
-                        sender=Component.BUTLER,
-                        sender_id=ctx.owner_id,
-                        send_type=SendType.SELF,
-                        content=result,
-                        data={"tool_name": tool_name, "args_str": args_str},
-                        tool_call_id=tool_call_id,
-                        message_role=MessageRole.TOOL
-                    )
-                    ctx.add_packet(tool_message)
-
-        # 情况 2: 普通回复 -> 发给 User
-        else:
-            user_msg = Message(
-                message_role=MessageRole.ASSISTANT,
-                sender=Component.BUTLER,
-                sender_id=ctx.owner_id,
-                send_type=SendType.USER,                          
-                content=response_msg.content
-            )
-            self.gateway.handle(user_msg)
+        
+        log_event(logger, "Bulter MAX_ITERATION_REACHED", owner_id=ctx.owner_id, level=40)

@@ -35,22 +35,45 @@ class InMemoryContextStore:
         self._load_all_memories()
 
     def _load_all_memories(self):
-        """启动时全量加载历史记忆文件到内存（全局单一记忆文件）"""
+        """启动时仅加载 Butler 记忆，以及任务树中标记为活跃（未完成）的上下文"""
+        # 1. 加载全局 Butler 记忆
         memory_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../memory'))
-        file_path = os.path.join(memory_dir, "butler.json")
-        
-        if not os.path.exists(file_path):
+        butler_path = os.path.join(memory_dir, "butler.json")
+        if os.path.exists(butler_path):
+            try:
+                with open(butler_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    ctx = Context.model_validate(data)
+                    with self._lock:
+                        self.store[(Component.BUTLER, "")] = ctx
+            except Exception as e:
+                get_logger("gateway").error(f"Failed to load memory {butler_path}: {e}")
+
+        # 2. 依托 TaskManager 精准加载未完成的节点上下文
+        if not self.task_manager:
             return
             
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                ctx = Context.model_validate(data)
-                with self._lock:
-                    # 对于 BUTLER，在内存中统一使用空字符串 "" 作为存储键
-                    self.store[(Component.BUTLER, "")] = ctx
-        except Exception as e:
-            get_logger("gateway").error(f"Failed to load memory {file_path}: {e}")
+        with self.task_manager._lock:
+            for node_id, node in self.task_manager.nodes.items():
+                # 仅捞取“等待中”或“运行中”的活跃节点
+                if node.status in [NodeStatus.WAITING, NodeStatus.RUNNING]:
+                    solve_id = self.task_manager.work_to_solve.get(node_id)
+                    
+                    # 路由推断：根节点归属 SOLVER，派生子节点归属 WORKER
+                    owner = Component.SOLVER if node_id == solve_id else Component.WORKER
+                    
+                    # 利用现有方法获取精准的文件路径
+                    file_path = self._get_file_path(owner, node_id)
+                    
+                    if os.path.exists(file_path):
+                        try:
+                            with open(file_path, "r", encoding="utf-8") as f:
+                                data = json.load(f)
+                                ctx = Context.model_validate(data)
+                                with self._lock:
+                                    self.store[(ctx.owner, ctx.owner_id)] = ctx
+                        except Exception as e:
+                            get_logger("gateway").error(f"Failed to load context {file_path}: {e}")
 
     def _get_effective_owner(self, owner: Component) -> Component:
         """核心修复：USER 和 BUTLER 逻辑上是同一个会话实体，强行合并缓存键"""
@@ -178,6 +201,77 @@ class Gateway:
         
         self._workers: List[threading.Thread] = []
         self._start_consumer()
+
+    def recover_pending_messages(self):
+        """
+        系统启动后调用：扫描所有加载的上下文，清理残缺循环，并重新激活含有 delivered=False 的执行链
+        """
+        logger.info("开始执行断线重启与离线补偿逻辑...")
+        pending_count = 0
+        with self.store._lock:
+            for (owner, context_id), ctx in self.store.store.items():
+                
+                # 1. 优先执行循环块回滚检查（剔除断掉的内部循环）
+                if ctx.rollback_incomplete_block():
+                    logger.warning(f"Context [{owner.value}]({context_id}) 发现未完成的循环块，已自动丢弃，回滚到上一次安全状态。")
+                    self.store.set(owner, ctx, context_id)
+                
+                target_components = set()
+                
+                # 2. 寻找未完成的动作（依据 delivered 标志）
+                for msg in ctx.packets:
+                    if getattr(msg, 'delivered', None) is False:
+                        pending_count += 1
+                        
+                        # 路由推断：这条未送达的消息该由谁继续处理？
+                        if msg.send_type == SendType.USER and msg.sender != Component.USER:
+                            # 离线补偿：系统发给用户的消息，交给 ChannelManager (USER 队列) 重发
+                            target_components.add(Component.USER)
+                        else:
+                            # 内部断点重启：Butler/Solver/Worker 被唤醒但没跑完，交还给 owner 的队列
+                            target_components.add(owner)
+                
+                # 3. 将该 Context 重新压入队列，触发对应线程的 while 循环
+                for comp in target_components:
+                    q = self._routes.get(comp)
+                    if q:
+                        q.put(ctx)
+                        logger.info(f"已将上下文 {context_id} 重新压入 {comp.value} 队列进行重启循环。")
+
+        log_event(logger, f"断线重启扫描完毕，共唤醒 {pending_count} 条待办任务。", level=20)
+
+    def recover_pending_messages(self):
+        """
+        系统启动后调用：扫描所有上下文，重新激活含有 delivered=False 消息的执行链
+        """
+        logger.info("开始执行断线重启与离线补偿逻辑...")
+        pending_count = 0
+        with self.store._lock:
+            for (owner, context_id), ctx in self.store.store.items():
+                target_components = set()
+                
+                # 寻找未完成的动作
+                for msg in ctx.packets:
+                    if not getattr(msg, 'delivered', True):  # 兼容以前的旧数据，没这个字段算True
+                        pending_count += 1
+                        log_event(logger, "PENDING_MESSAGE_FOUND", sender=str(msg.sender), send_type=str(msg.send_type), receiver_id=str(msg.receiver_id), level=30)
+                        
+                        # 路由推断：谁该为这条未完成的消息负责？
+                        if msg.send_type == SendType.USER and msg.sender != Component.USER:
+                            # 1. 离线补偿：系统发给用户的消息，交给 ChannelManager 所在的 USER 队列重发
+                            target_components.add(Component.USER)
+                        else:
+                            # 2. 内部断点重启：Butler/Solver/Worker 的输入消息没处理完，交给 owner 自身队列继续循环
+                            target_components.add(owner)
+                
+                # 将该 Context 重新压入对应组件的 Queue 中唤醒它们
+                for comp in target_components:
+                    q = self._routes.get(comp)
+                    if q:
+                        q.put(ctx)
+                        logger.info(f"已将上下文 {context_id} 重新压入 {comp.value} 队列进行重启。")
+
+        log_event(logger, f"断线重启扫描完毕，共发现 {pending_count} 条待办。", level=20)
 
     def start_running(self, comp: Component, context_id: str):
         with self._run_lock:
@@ -319,7 +413,6 @@ class Gateway:
                 if msg.sender == Component.BUTLER:
                     target_id = msg.sender_id # Butler 层发送，其 sender_id 本身就是 channel_id
                 else:
-                    # 使用新的 get_task_by_node_id 方法
                     task = self.task_manager.get_task(msg.sender_id) or self.task_manager.get_task_by_node_id(msg.sender_id)
                     if task:
                         target_id = task.channel_id

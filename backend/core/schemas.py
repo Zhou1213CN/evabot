@@ -153,6 +153,9 @@ class Message(_Schema):
     artifacts: list[ArtifactRef] = Field(default_factory=list)
     data: dict | None = Field(default=None, description="可选：附加数据")
     status: Status = Field(default=Status.DONE, description="消息状态")
+    source_channel: str | None = Field(default=None, description="可选：消息来源的外部渠道名称，如 'telegram', 'web'")
+    raw_message_id: str | None = Field(default=None, description="可选：外部渠道的原始消息ID，用于实现平台的引用回复功能")
+    delivered: bool = Field(default=False, description="是否已成功投递给用户（结合 Context 实现离线重发补偿机制）")
 
 
 # ----------------------------
@@ -177,4 +180,57 @@ class Context(_Schema):
     def add_packet(self, packet: Message):
         self.packets.append(packet)
         self.update_timestamp()
+
+    def rollback_incomplete_block(self) -> bool:
+        """
+        检查并清理未完成的 LLM 循环块（内部原子操作断裂）。
+        如果最后的 ASSISTANT 消息包含 tool_calls，但后续缺少对应的 TOOL 回复，则直接丢弃该块。
+        返回是否发生了回滚。
+        """
+        if not self.packets:
+            return False
+
+        # 从后往前找最后一个 ASSISTANT 消息
+        last_assistant_idx = -1
+        for i in range(len(self.packets) - 1, -1, -1):
+            if self.packets[i].message_role == MessageRole.ASSISTANT:
+                last_assistant_idx = i
+                break
+
+        if last_assistant_idx == -1:
+            return False
+
+        last_assistant_msg = self.packets[last_assistant_idx]
+
+        # 若无 tool_calls，说明是纯文本回复，该块已完整
+        if not last_assistant_msg.data or not last_assistant_msg.data.get("tool_calls"):
+            return False
+
+        tool_call_ids_needed = {tc["id"] for tc in last_assistant_msg.data["tool_calls"]}
+        tool_call_ids_found = set()
+
+        # 收集它之后所有 TOOL 消息的 tool_call_id
+        for i in range(last_assistant_idx + 1, len(self.packets)):
+            msg = self.packets[i]
+            if msg.message_role == MessageRole.TOOL and msg.tool_call_id:
+                tool_call_ids_found.add(msg.tool_call_id)
+
+        # 只要需要的和找到的对不上，说明循环块中途断裂
+        if tool_call_ids_needed != tool_call_ids_found:
+            # 直接切片，精准切除这个 ASSISTANT 及其附带的残缺 TOOL 消息
+            self.packets = self.packets[:last_assistant_idx]
+            self.update_timestamp()
+            return True
+
+        return False
+
+    def ack_all_messages(self):
+        """确认上下文中的所有消息当前已处理完毕 (全局标记 delivered = True)"""
+        changed = False
+        for msg in self.packets:
+            if getattr(msg, 'delivered', None) is False:
+                msg.delivered = True
+                changed = True
+        if changed:
+            self.update_timestamp()
 

@@ -63,6 +63,8 @@ async def lifespan(app: FastAPI):
         webbrowser.open("http://127.0.0.1:8000")
     
     threading.Thread(target=open_browser, daemon=True).start()
+    
+    gateway.recover_pending_messages()
 
     yield
     # 退出时清理

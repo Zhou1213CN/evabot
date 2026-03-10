@@ -48,7 +48,6 @@ def execute_openai_completion(
         
     except Exception as e:
         log_event(logger, "LLM_ERR", error=str(e), model=model_conf.id)
-        raise e
 
     # -------------------------------------------
     # 解析原生结果
@@ -102,11 +101,11 @@ def call_llm(
     
     ref = model_override or cfg.defaults.get(ctx.owner)
     if not ref:
-        raise ValueError(f"No default model for {ctx.owner}")
+        log_event(logger, "LLM_ERR", error="No default model reference found for context owner", owner=ctx.owner,level=40)
 
     provider_conf, model_conf = cfg.get_model(ref)
     if not provider_conf or not model_conf:
-        raise ValueError(f"Model config not found: {ref}")
+        log_event(logger, "LLM_ERR", error="Model config not found", ref=ref,level=40)
     
     p_name = cfg.get_provider_name(provider_conf)
     # -------------------------------------------
@@ -161,7 +160,7 @@ def call_llm(
     # -------------------------------------------
     # 3. 触发底层网络调用
     # -------------------------------------------
-    if provider_conf.api_type.startswith("openai"):
+    if provider_conf.api_type.lower().startswith("openai"):
         content_text, tool_calls_data, usage_dict, reasoning_content = execute_openai_completion(
             p_name=p_name,
             provider_conf=provider_conf,
@@ -171,7 +170,7 @@ def call_llm(
             json_mode=json_mode
         )
     else:
-        raise NotImplementedError(f"Provider type not supported: {provider_conf.api_type}")
+        log_event(logger, "LLM_ERR", error="Unsupported provider type", api_type=provider_conf.api_type,model=model_conf.id,level=40)
     
     # -------------------------------------------
     # 4. 结算与封装业务层 Message

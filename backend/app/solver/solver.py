@@ -74,6 +74,9 @@ class SolverService():
                     self.gateway.handle(error_response)  # 直接发回用户，告知错误
                     log_event(logger, "PROCESS_ERROR", error=str(e), level=40)
                 finally:
+                    # [新增] 循环执行完毕或抛出异常后，当前 Context 状态已稳定，将所有消息标记为已处理
+                    ctx.ack_all_messages()
+                    self.gateway.store.set(Component.SOLVER, ctx, ctx.owner_id)
                     # 标记任务完成（对队列计数很重要）
                     self.queue.task_done()
                     self.gateway.finish_running(Component.SOLVER, ctx.owner_id, ctx)
@@ -99,161 +102,182 @@ class SolverService():
     def run_loop(self, ctx: Context):
         if not ctx.packets:
             return
-        self.gateway.task_manager.update_node_status(ctx.owner_id, NodeStatus.RUNNING)
-        resp = self.run_init(ctx)
-        if resp.data and resp.data.get("tool_calls"):
-            heart_content = ''
-            have_artiface = []
-            for tc in resp.data["tool_calls"]:
-                func = tc.get("function", {})
-                tool_name = func.get("name")
-                args_str = func.get("arguments", "{}")
-                tool_call_id = tc.get("id")
-                args_dict = extract_json(args_str)
-
-                if tool_name == 'communicate_with_upstream':
-                    info_msg = Message(
-                        status=Status.WAITING,
-                        message_type=MessageType.EXTRA,
-                        sender=Component.SOLVER,
-                        sender_id=ctx.owner_id,
-                        send_type=SendType.UPWARD,
-                        content=f'我的tool_call_id是{ctx.packets[0].tool_call_id}。以下是我需要的信息: \n{args_dict.get("send_info")}'
-                    )
-                    self.gateway.handle(info_msg)
-                    tool_ack_msg = Message(
-                        sender=Component.SOLVER,
-                        send_type=SendType.SELF,
-                        content='已向上游请求信息，等待反馈...',
-                        tool_call_id=tool_call_id,
-                        message_role=MessageRole.TOOL
-                    )
-                    ctx.add_packet(tool_ack_msg)
-                    
-                elif tool_name == 'communicate_with_downstream':
-                    provide_info = args_dict.get("provide_info")
-                    target_tool_call_id = args_dict.get("tool_call_id")
-                    
-                    # 彻底丢弃 ctx.sub_agent，通过全局字典 O(1) 查找
-                    receiver_id = self.gateway.task_manager.find_receiver_by_tool_call_id(target_tool_call_id)
-                    
-                    if provide_info and receiver_id:
-                        info_msg = Message(
-                            sender_id=ctx.owner_id,
-                            message_type=MessageType.EXTRA,
-                            sender=Component.SOLVER,
-                            send_type=SendType.DOWNWARD,
-                            receiver_id=receiver_id,
-                            content=f'【系统通知：收到来自上游的最新补充信息】: {provide_info}'
-                        )
-                        self.gateway.handle(info_msg)
-                        ctx.add_packet(Message(
-                            sender=Component.SOLVER,
-                            send_type=SendType.SELF,
-                            content='已收到信息',
-                            message_role=MessageRole.TOOL,
-                            tool_call_id=tool_call_id
-                        ))
-                    else:
-                        retry_msg = Message(
-                            sender=Component.SOLVER,
-                            send_type=SendType.SELF,
-                            content='信息发送失败，请再次确认tool_call_id，请检查后重试。',
-                            message_role=MessageRole.TOOL,
-                            tool_call_id=tool_call_id                                    
-                        )
-                        ctx.add_packet(retry_msg)
-                        self.run_loop(ctx)
-                        
-                elif tool_name == "use_skill":
-                    skill_name = args_dict.get("skill_name")
-                    goal = args_dict.get("goal", "")
-                    needs_verification = args_dict.get("needs_self_verification", False)
-                    worker_msg = Message(
-                        sender_id=ctx.owner_id,
-                        sender=Component.SOLVER,
-                        send_type=SendType.DOWNWARD,
-                        content='你负责的阶段性目标是: ' + goal,
-                        data={
-                            'skill_name': skill_name,
-                            'needs_self_verification': needs_verification,
-                            "permission_type": ctx.permission_type
-                        },
-                        tool_call_id=tool_call_id,
-                    )
-
-                    result = self.gateway.handle(worker_msg)
-                    
-                    # 删除了原本对 ctx.pending_works 和 ctx.sub_agent 的冗余维护
-                    heart_content += f"Processing by skill: {skill_name} for {goal}\n"
-
-                    tool_ack_msg = Message(
-                        sender=Component.SOLVER,
-                        send_type=SendType.SELF,
-                        content='任务已发布，正在处理...',
-                        tool_call_id=tool_call_id,
-                        message_role=MessageRole.TOOL
-                    )
-                    ctx.add_packet(tool_ack_msg)
-                elif tool_name == "report_deliverable_file":
-                    file_path = args_dict.get("file_path", "")
-                    description = args_dict.get("description", "")                    
-                    mime_type, _ = mimetypes.guess_type(file_path)
-                    have_artiface.append(ArtifactRef(
-                        uri=file_path,
-                        name=os.path.basename(file_path),
-                        description=description,
-                        mime=mime_type or "application/octet-stream"
-                    )) 
-                    
-                else:
-                    start_ts = time.time()
-                    result = execute_tool(tool_name, args_dict)
-                    duration_s = round(time.time() - start_ts, 2)
-                    self.gateway.task_manager.record_node_cost(ctx.owner_id, 0, duration_s)
-                    tool_message = Message(
-                        sender=Component.SOLVER,
-                        send_type=SendType.SELF,
-                        content=result,
-                        data={"tool_name": tool_name, "args_str": args_str},
-                        tool_call_id=tool_call_id,
-                        message_role=MessageRole.TOOL
-                    )
-                    ctx.add_packet(tool_message)
-                    self.run_loop(ctx)  # 执行完工具后继续循环，等待新的 tool_calls 或者任务结束信号
-
-            if heart_content:
-                self.gateway.task_manager.update_node_status(ctx.owner_id, NodeStatus.WAITING)
-                heart_msg = Message(
+        if len(ctx.packets) == 1:
+            heart_msg = Message(
                     sender_id=ctx.owner_id,
                     sender=Component.SOLVER,
                     send_type=SendType.USER,
-                    content=f'【系统通知：心跳消息】\n{heart_content}',
+                    content=f'【系统通知：任务已开始】\n已收到来自 {ctx.packets[0].sender} 的任务：{ctx.packets[0].content}',
                     message_type=MessageType.HEARTBEAT
                 )
-                self.gateway.handle(heart_msg)
+            self.gateway.handle(heart_msg)
+        self.gateway.task_manager.update_node_status(ctx.owner_id, NodeStatus.RUNNING)
 
-            if have_artiface:
+        iteration = 0
+        max_iterations = 20  # 防止陷入死循环
+        should_wait = False
+        while iteration < max_iterations:
+            iteration += 1
+            resp = self.run_init(ctx)
+            if resp.data and resp.data.get("tool_calls"):
+                heart_content = ''
+                have_artiface = []
+                for tc in resp.data["tool_calls"]:
+                    func = tc.get("function", {})
+                    tool_name = func.get("name")
+                    args_str = func.get("arguments", "{}")
+                    tool_call_id = tc.get("id")
+                    args_dict = extract_json(args_str)
+
+                    if tool_name == 'communicate_with_upstream':
+                        info_msg = Message(
+                            status=Status.WAITING,
+                            message_type=MessageType.EXTRA,
+                            sender=Component.SOLVER,
+                            sender_id=ctx.owner_id,
+                            send_type=SendType.UPWARD,
+                            content=f'我的tool_call_id是{ctx.packets[0].tool_call_id}。以下是我需要的信息: \n{args_dict.get("send_info")}'
+                        )
+                        self.gateway.handle(info_msg)
+                        tool_ack_msg = Message(
+                            sender=Component.SOLVER,
+                            send_type=SendType.SELF,
+                            content='已向上游请求信息，等待反馈...',
+                            tool_call_id=tool_call_id,
+                            message_role=MessageRole.TOOL
+                        )
+                        ctx.add_packet(tool_ack_msg)
+                        should_wait = True
+                        
+                    elif tool_name == 'communicate_with_downstream':
+                        provide_info = args_dict.get("provide_info")
+                        target_tool_call_id = args_dict.get("tool_call_id")
+                        
+                        # 彻底丢弃 ctx.sub_agent，通过全局字典 O(1) 查找
+                        receiver_id = self.gateway.task_manager.find_receiver_by_tool_call_id(target_tool_call_id)
+                        
+                        if provide_info and receiver_id:
+                            info_msg = Message(
+                                sender_id=ctx.owner_id,
+                                message_type=MessageType.EXTRA,
+                                sender=Component.SOLVER,
+                                send_type=SendType.DOWNWARD,
+                                receiver_id=receiver_id,
+                                content=f'【系统通知：收到来自上游的最新补充信息】: {provide_info}'
+                            )
+                            self.gateway.handle(info_msg)
+                            ctx.add_packet(Message(
+                                sender=Component.SOLVER,
+                                send_type=SendType.SELF,
+                                content='已收到信息',
+                                message_role=MessageRole.TOOL,
+                                tool_call_id=tool_call_id
+                            ))
+                        else:
+                            retry_msg = Message(
+                                sender=Component.SOLVER,
+                                send_type=SendType.SELF,
+                                content='信息发送失败，请再次确认tool_call_id，请检查后重试。',
+                                message_role=MessageRole.TOOL,
+                                tool_call_id=tool_call_id                                    
+                            )
+                            ctx.add_packet(retry_msg)
+                            
+                    elif tool_name == "use_skill":
+                        skill_name = args_dict.get("skill_name")
+                        goal = args_dict.get("goal", "")
+                        needs_verification = args_dict.get("needs_self_verification", False)
+                        worker_msg = Message(
+                            sender_id=ctx.owner_id,
+                            sender=Component.SOLVER,
+                            send_type=SendType.DOWNWARD,
+                            content='你负责的阶段性目标是: ' + goal,
+                            data={
+                                'skill_name': skill_name,
+                                'needs_self_verification': needs_verification,
+                                "permission_type": ctx.permission_type
+                            },
+                            tool_call_id=tool_call_id,
+                        )
+
+                        result = self.gateway.handle(worker_msg)
+                        
+                        heart_content += f"Processing by skill: {skill_name} for {goal}\n"
+
+                        tool_ack_msg = Message(
+                            sender=Component.SOLVER,
+                            send_type=SendType.SELF,
+                            content='任务已发布，正在处理...',
+                            tool_call_id=tool_call_id,
+                            message_role=MessageRole.TOOL
+                        )
+                        ctx.add_packet(tool_ack_msg)
+                        should_wait = True
+                    elif tool_name == "report_deliverable_file":
+                        file_path = args_dict.get("file_path", "")
+                        description = args_dict.get("description", "")                    
+                        mime_type, _ = mimetypes.guess_type(file_path)
+                        have_artiface.append(ArtifactRef(
+                            uri=file_path,
+                            name=os.path.basename(file_path),
+                            description=description,
+                            mime=mime_type or "application/octet-stream"
+                        )) 
+                        
+                    else:
+                        start_ts = time.time()
+                        result = execute_tool(tool_name, args_dict)
+                        duration_s = round(time.time() - start_ts, 2)
+                        self.gateway.task_manager.record_node_cost(ctx.owner_id, 0, duration_s)
+                        tool_message = Message(
+                            sender=Component.SOLVER,
+                            send_type=SendType.SELF,
+                            content=result,
+                            data={"tool_name": tool_name, "args_str": args_str},
+                            tool_call_id=tool_call_id,
+                            message_role=MessageRole.TOOL
+                        )
+                        ctx.add_packet(tool_message)
+
+                if heart_content:
+                    self.gateway.task_manager.update_node_status(ctx.owner_id, NodeStatus.WAITING)
+                    heart_msg = Message(
+                        sender_id=ctx.owner_id,
+                        sender=Component.SOLVER,
+                        send_type=SendType.USER,
+                        content=f'【系统通知：心跳消息】\n{heart_content}',
+                        message_type=MessageType.HEARTBEAT
+                    )
+                    self.gateway.handle(heart_msg)
+
+                if have_artiface:
+                    self.gateway.task_manager.update_node_status(ctx.owner_id, NodeStatus.COMPLETED)
+                    final_msg = Message(
+                        sender_id=ctx.owner_id,
+                        sender=Component.SOLVER,
+                        send_type=SendType.USER,
+                        content=f'【系统通知：任务已结束】\n{resp.content.strip()}\n{format_artifacts(have_artiface)}',
+                        message_type=MessageType.REPORT,
+                        artifacts=have_artiface,
+                        tool_call_id=ctx.packets[0].tool_call_id
+                    )
+                    self.gateway.handle(final_msg)
+                    return
+                if should_wait:
+                    self.gateway.task_manager.update_node_status(ctx.owner_id, NodeStatus.WAITING)
+                    return
+
+
+            else:
                 self.gateway.task_manager.update_node_status(ctx.owner_id, NodeStatus.COMPLETED)
                 final_msg = Message(
                     sender_id=ctx.owner_id,
                     sender=Component.SOLVER,
                     send_type=SendType.USER,
-                    content=f'【系统通知：任务已结束】\n{resp.content.strip()}\n{format_artifacts(have_artiface)}',
+                    content=f'【系统通知：任务已结束】\n{resp.content.strip()}',
                     message_type=MessageType.REPORT,
-                    artifacts=have_artiface,
                     tool_call_id=ctx.packets[0].tool_call_id
                 )
                 self.gateway.handle(final_msg)
-
-        else:
-            self.gateway.task_manager.update_node_status(ctx.owner_id, NodeStatus.COMPLETED)
-            final_msg = Message(
-                sender_id=ctx.owner_id,
-                sender=Component.SOLVER,
-                send_type=SendType.USER,
-                content=f'【系统通知：任务已结束】\n{resp.content.strip()}',
-                message_type=MessageType.REPORT,
-                tool_call_id=ctx.packets[0].tool_call_id
-            )
-            self.gateway.handle(final_msg)
+                return
+        log_event(logger, "Solver MAX_ITERATION_REACHED", owner_id=ctx.owner_id, level=40)

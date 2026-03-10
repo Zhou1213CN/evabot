@@ -172,9 +172,9 @@ run.py                      # System entry point
 - [x] Core architecture
 - [x] Frontend UI
 - [ ] Scheduled tasks
-- [ ] Daily information recording/processing (Notes)
-- [ ] Computer operation (Money)
-- [ ] Multi-channel messaging support (Social)
+- [ ] Daily information recording/processing
+- [ ] Computer operation
+- [ ] Multi-channel messaging support
 - [ ] Multimodal support
 
 

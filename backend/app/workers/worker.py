@@ -73,6 +73,9 @@ class WorkerService():
                     self.gateway.handle(error_response)  # 直接发回用户，告知错误
                     log_event(logger, "PROCESS_ERROR", error=str(e), level=40)
                 finally:
+                    # [新增] 循环执行完毕或抛出异常后，当前 Context 状态已稳定，将所有消息标记为已处理
+                    ctx.ack_all_messages()
+                    self.gateway.store.set(Component.WORKER, ctx, ctx.owner_id)
                     # 标记任务完成（对队列计数很重要）
                     self.queue.task_done()
                     self.gateway.finish_running(Component.WORKER, ctx.owner_id, ctx)
@@ -110,10 +113,12 @@ class WorkerService():
                     latency = resp.data.get("latency_s", 0.0)
                     self.gateway.task_manager.record_node_cost(ctx.owner_id, cost, latency)
 
-            
+                is_finished = False
+                have_artiface = []
+
                 if resp.data and resp.data.get("tool_calls"):
                     heart_content=''
-                    have_artiface = []
+                    
                     for tc in resp.data["tool_calls"]:
                         func = tc.get("function", {})
                         tool_name = func.get("name")
@@ -227,6 +232,14 @@ class WorkerService():
                                 description=description,
                                 mime=mime_type or "application/octet-stream"
                             )) 
+                            ctx.add_packet(Message(
+                                sender=Component.WORKER,
+                                send_type=SendType.SELF,
+                                content=f"已成功记录交付物文件：{file_path}，等待最终审计。",
+                                message_role=MessageRole.TOOL,
+                                tool_call_id=tool_call_id
+                            ))
+                            is_finished = True
                         else:
                             start_ts = time.time()
                             result = execute_tool(tool_name, args_dict)
@@ -252,61 +265,51 @@ class WorkerService():
                         )
                         self.gateway.handle(heart_msg)
 
-                    if have_artiface == []:
-                        self.gateway.task_manager.update_node_status(ctx.owner_id, NodeStatus.COMPLETED)
-                        report = Message(
-                            sender_id=ctx.owner_id,
-                            message_type=MessageType.REPORT,
-                            sender=Component.WORKER,
-                            send_type=SendType.UPWARD,
-                            receiver_id=ctx.packets[0].sender_id,
-                            content=f'【系统通知：任务已结束】\nThe task is :{ctx.packets[0].content}\nthe feedback is:\n{resp.content.strip()}',
-                            tool_call_id=ctx.packets[0].tool_call_id,
-                            artifacts=have_artiface
-                        )
-                        result = self.gateway.handle(report)
-                        return
+                    if not is_finished:
+                        if not self.gateway.update_running(Component.WORKER, ctx.owner_id, ctx) or should_wait:
+                            self.gateway.task_manager.update_node_status(ctx.owner_id, NodeStatus.WAITING)
+                            return
+                        continue
 
-                    if not self.gateway.update_running(Component.WORKER, ctx.owner_id, ctx) or should_wait:
-                        self.gateway.task_manager.update_node_status(ctx.owner_id, NodeStatus.WAITING)
-                        return
                 else:
-                    if iteration > 8:
-                        # 复杂任务结束，审核结果并评估资源使用
-                        is_passed, has_verified, new_ctx = self.auditor.run_finish_audit(ctx, skill_content, iteration)
-                        if not is_passed:
-                            if new_ctx:
-                                self.gateway.task_manager.update_node_status(ctx.owner_id, NodeStatus.FAILED)
-                                report = Message(
-                                    sender_id=ctx.owner_id,
-                                    status=Status.FAILED,
-                                    message_type=MessageType.REPORT,
-                                    sender=Component.WORKER,
-                                    send_type=SendType.UPWARD,
-                                    receiver_id=ctx.packets[0].sender_id,
-                                    content=f"【系统通知：任务失败终止】\nThe task is :{ctx.packets[0].content }\n\n经审计确认当前技能可能无法完成任务或存在逻辑缺陷。请检查任务内容，或使用 skill-manager 创建/更新技能。",
-                                    tool_call_id=ctx.packets[0].tool_call_id
-                                )
-                                self.gateway.handle(report)
-                                log_event(logger, "SKILL_FAILED", skill_name=skill_name, level=30)
-                                return
-                            elif not has_verified:
-                                ctx = new_ctx
-                                verif = Message(
-                                    sender=Component.WORKER,
-                                    send_type=SendType.SELF,
-                                    content=f"经审计确认当前技能没有对最终结果自我测试/验证。请对交付结果进行验证。",
-                                )
-                                ctx.add_packet(verif)
-                                iteration = 0
-                                log_event(logger, "WORKER_AUDIT_RETRY", content="任务未通过质检，已重置上下文重新执行。")
-                                continue
-                            else:
-                                ctx = new_ctx
-                                iteration = 0
-                                log_event(logger, "WORKER_AUDIT_RETRY", content="任务未通过质检，已重置上下文重新执行。")
-                                continue
+                    is_finished = True
 
+                if is_finished:
+                    is_passed, has_verified, new_ctx = self.auditor.run_finish_audit(ctx, skill_content, iteration)
+                    
+                    if not is_passed:
+                        if not new_ctx:
+                            self.gateway.task_manager.update_node_status(ctx.owner_id, NodeStatus.FAILED)
+                            report = Message(
+                                sender_id=ctx.owner_id,
+                                status=Status.FAILED,
+                                message_type=MessageType.REPORT,
+                                sender=Component.WORKER,
+                                send_type=SendType.UPWARD,
+                                receiver_id=ctx.packets[0].sender_id,
+                                content=f"【系统通知：任务失败终止】\nThe task is :{ctx.packets[0].content }\n\n经审计确认当前技能可能无法完成任务或存在逻辑缺陷。请检查任务内容，或使用 skill-manager 创建/更新技能。",
+                                tool_call_id=ctx.packets[0].tool_call_id
+                            )
+                            self.gateway.handle(report)
+                            return
+                        else:
+                            ctx = new_ctx
+                            iteration = 0
+                            continue
+                            
+                    elif not has_verified:
+                        ctx = new_ctx
+                        verif = Message(
+                            sender=Component.WORKER,
+                            send_type=SendType.SELF,
+                            content="经审计确认当前技能没有对最终结果自我测试/验证。请对交付结果进行验证。",
+                            message_role=MessageRole.USER
+                        )
+                        ctx.add_packet(verif)
+                        iteration = 0
+                        continue
+                        
+                    # 通过审计，安全生成 Report 并完结
                     self.gateway.task_manager.update_node_status(ctx.owner_id, NodeStatus.COMPLETED)
                     report = Message(
                         sender_id=ctx.owner_id,
@@ -315,9 +318,10 @@ class WorkerService():
                         send_type=SendType.UPWARD,
                         receiver_id=ctx.packets[0].sender_id,
                         content=f'【系统通知：任务已结束】\nThe task is :{ctx.packets[0].content}\nthe feedback is:\n{resp.content.strip()}',
-                        tool_call_id=ctx.packets[0].tool_call_id
+                        tool_call_id=ctx.packets[0].tool_call_id,
+                        artifacts=have_artiface
                     )
-                    result = self.gateway.handle(report)
+                    self.gateway.handle(report)
                     return
 
             # 超出循环次数，调用Auditor审计是否继续

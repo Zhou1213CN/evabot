@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from typing import Tuple
 from backend.core.base_tools import execute_tool, get_base_tool
 from backend.core.schemas import Context, Message, Component, MessageRole, MessageType, NodeStatus, SendType
@@ -21,7 +22,6 @@ class WorkerAuditor:
         eval_ctx = Context(owner=Component.AUDITOR, owner_id=ctx.owner_id)
         eval_ctx.model_id = self.llm_config_loader.defaults.get(Component.AUDITOR)
         
-        # 补齐最新的必备字段 sender_id
         eval_msg = Message(
             sender_id=ctx.owner_id,
             sender=Component.AUDITOR,
@@ -39,6 +39,45 @@ class WorkerAuditor:
             latency = resp.data.get("latency_s", 0.0)
             self.task_manager.record_node_cost(ctx.owner_id, cost, latency)
 
+    def _save_audit_log(self, ctx: Context, action: str, system_prompt: str, user_prompt: str, response: Message, iteration: int, parsed_result: dict = None):
+        """将同一轮审计（iteration）的所有推理过程追加保存到同一个 JSON 文件中"""
+        if not getattr(ctx, "work_dir", None):
+            return
+            
+        log_dir = os.path.join(ctx.work_dir, "audits")
+        os.makedirs(log_dir, exist_ok=True)
+        
+        file_path = os.path.join(log_dir, f"audit_iter_{iteration}.json")
+        
+        log_entry = {
+            "timestamp": time.time(),
+            "action": action,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "llm_response": response.content,
+            "parsed_result": parsed_result,
+            "reasoning_content": response.data.get("reasoning_content") if response.data else None,
+            "cost": response.data.get("cost") if response.data else 0,
+            "latency_s": response.data.get("latency_s") if response.data else 0
+        }
+        
+        # 读取已有日志数组并追加
+        logs = []
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    logs = json.load(f)
+            except Exception:
+                pass
+                
+        logs.append(log_entry)
+        
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(logs, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save audit log: {e}")
+
     def _update_attempt(self, ctx: Context, status: NodeStatus, attribution: bool = None, feedback: str = None, add_new: bool = False, iteration: int = 0):
         """同步审计结果到当前 Attempt，并在需要继续时压入一个新的 Attempt"""
         if not self.task_manager: return
@@ -52,7 +91,6 @@ class WorkerAuditor:
                 # 同步审计反馈与状态
                 if not last_attempt.model:
                     last_attempt.model = ctx.model_id
-                last_attempt.status = status
                 if attribution is not None:
                     last_attempt.attribution = attribution
                 if feedback:
@@ -71,18 +109,17 @@ class WorkerAuditor:
         summary = f"【初始任务】：{ctx.packets[0].content}\n"
         summary += "【执行轨迹】：\n"
         for p in ctx.packets[1:]:
-            content_preview = p.content[:50] if p.content else (", ".join([f"{t.get('name', 'unknown')}:{t.get('arguments', 'no arguments')[:50]}" for t in p.data.get('tool_calls', [])]) if p.data.get('tool_calls') else '<no content>')
+            content_preview = p.content[:2000] if p.content else (", ".join([f"{t.get('name', 'unknown')}:{t.get('arguments', 'no arguments')[:50]}" for t in p.data.get('tool_calls', [])]) if p.data.get('tool_calls') else '<no content>')
             summary += f"- [{p.message_role.value}] {content_preview}...\n"
         return summary
 
-    def calculate_complexity(self, ctx: Context) -> float:
+    def calculate_complexity(self, ctx: Context, iteration: int) -> float:
         """评估任务实际难度 (1.0 - 5.0)"""
-        # 提取执行轨迹的简要信息
         trace_summary = self.get_context_summary(ctx)
         prompt = trace_summary
 
         system_prompt = f"""请评估以下任务的实际执行复杂度 (1.0 到 5.0 分)，数值越高表示任务越复杂。
-        以你的水平做这个任务，勉强能完成是5.0分。任意一个大模型都可以轻松完成，是1。0分。
+        以你的水平做这个任务，勉强能完成是5.0分。任意一个大模型都可以轻松完成，是1.0分。
         不要受到这个任务执行员的能力所干扰，完全根据任务本身的复杂度来评估。
         直接返回一个 JSON，格式：{{"actual_complexity": 3.0}}"""
         
@@ -91,29 +128,39 @@ class WorkerAuditor:
         self._record_llm_cost(ctx, resp)
         
         res_dict = extract_json(resp.content)
+        self._save_audit_log(ctx, "calculate_complexity", system_prompt, prompt, resp, iteration, res_dict)
+        
         ctx.complexity = float(res_dict.get("actual_complexity", 3.0))
 
+    def audit_task(self, ctx: Context, iteration: int, res_dict: dict = None) -> dict:
+        if res_dict is None:
+            res_dict = {}
 
-    def audit_task(self, ctx: Context, res_dict={}) -> dict:
-        """核心裁判：评估是否通过及归因"""
-        finally_report = ctx.packets[-1].content if len(ctx.packets) > 1 else ""
-        # 提取执行轨迹与是否需要验证
+        # 修复：只提取大模型思考角色的文本，过滤 TOOL 的底层干扰
+        assistant_msgs = [p for p in ctx.packets if p.message_role == MessageRole.ASSISTANT]
+        finally_report = assistant_msgs[-1].content if assistant_msgs else ""
+        
         trace_summary = self.get_context_summary(ctx)
         needs_verification = ctx.packets[0].data.get("needs_verification", False) if ctx.packets[0].data else False
 
         prompt = f"【最终汇报】：\n{finally_report}"
         system_prompt = """你是一个严苛的审计员。判断执行员的【最终汇报】是否承认失败。承认失败 is_passed 是 false，否则为 true。请严格返回 JSON 格式： {"is_passed": true/false}"""
         
-        if res_dict=={}:
+        if not res_dict:
             eval_ctx = self._create_eval_context(ctx, prompt)
             resp = call_llm(eval_ctx, system_prompt=system_prompt, json_mode=True)
             self._record_llm_cost(ctx, resp)
             
             audit_result = extract_json(resp.content)
-            # 兼容处理
+            self._save_audit_log(ctx, "audit_task_step1", system_prompt, prompt, resp, iteration, audit_result)
+            
             if "is_passed" not in audit_result:
-                return self.audit_task(ctx) # 重新审计一次，给模型一个机会修正格式问题
+                return self.audit_task(ctx, iteration) 
+                
+            # 修复：必须赋予游标才能确保结果顺延到下一个判断
+            res_dict = audit_result 
         
+        # 精简逻辑：如果直接承认失败了，没有必要做后面的幻觉检测
         if not res_dict.get("is_passed"):
             return {"is_passed": False, "have_verified": True}
         
@@ -123,17 +170,18 @@ class WorkerAuditor:
         注意：这里我们不判定这些步骤是否必要（即使有些步骤看起来多余或者不合理，只要它们的结果是通过正确的工具调用获得的，就不算幻觉），我们只判定最终汇报的信息是否可靠。
         请严格返回 JSON 格式： {"is_passed": true/false}"""
         
-        if res_dict=={}:
+        if not res_dict:
             eval_ctx = self._create_eval_context(ctx, prompt)
             resp = call_llm(eval_ctx, system_prompt=system_prompt, json_mode=True)
             self._record_llm_cost(ctx, resp)
             
             audit_result = extract_json(resp.content)
-            # 兼容处理
+            self._save_audit_log(ctx, "audit_task_step2", system_prompt, prompt, resp, iteration, audit_result)
+            
             if "is_passed" not in audit_result:
-                return self.audit_task(ctx) # 重新审计一次，给模型一个机会修正格式问题
+                return self.audit_task(ctx, iteration) 
         
-        res_dict ={'is_passed': audit_result.get("is_passed"), 'have_verified': True}
+        res_dict = {'is_passed': audit_result.get("is_passed"), 'have_verified': True}
         if needs_verification and audit_result.get("is_passed"):
             prompt = trace_summary
             system_prompt = """你是一个严苛的审计员。请基于【执行轨迹概要】，判断执行员的【最终汇报】是否经过自我验证。
@@ -143,23 +191,28 @@ class WorkerAuditor:
             eval_ctx = self._create_eval_context(ctx, prompt)
             resp = call_llm(eval_ctx, system_prompt=system_prompt, json_mode=True)
             self._record_llm_cost(ctx, resp)
+            
             verify_result = extract_json(resp.content)
-            # 兼容处理
+            self._save_audit_log(ctx, "audit_task_verify", system_prompt, prompt, resp, iteration, verify_result)
+            
             if "have_verified" not in verify_result:
-                return self.audit_task(ctx, res_dict) # 重新审计一次，给模型一个机会修正格式问题
+                return self.audit_task(ctx, iteration, res_dict) 
             else:
                 res_dict["have_verified"] = verify_result.get("have_verified")
             
         log_event(logger, "AUDIT_RESULT", node_id=ctx.owner_id, result=res_dict)
         return res_dict
  
-    def update_worker(self, ctx: Context, failure_reason: str):
+    def update_worker(self, ctx: Context, failure_reason: str, iteration: int):
         
         system_prompt = """根据失败原因，总结通用性经验，调用edit_file工具，把经验更新到 worker.py 中。如果是任务特殊性，并不能给未来的其他工作提供指导意义的经验，就不需要更新文件了。"""
         worker_prompt = load_prompt(os.path.dirname(__file__),'worker.md',True)
-        eval_ctx = self._create_eval_context(ctx, f'【失败原因】：{failure_reason}\n【之前经验与该文件路径】：\n{worker_prompt}')
+        user_prompt = f'【失败原因】：{failure_reason}\n【之前经验与该文件路径】：\n{worker_prompt}'
+        
+        eval_ctx = self._create_eval_context(ctx, user_prompt)
         resp = call_llm(eval_ctx, system_prompt=system_prompt, tools=get_base_tool(need_tools))
         self._record_llm_cost(ctx, resp)
+        self._save_audit_log(ctx, "update_worker", system_prompt, user_prompt, resp, iteration)
         
         if resp.data and resp.data.get("tool_calls"):
             tc = resp.data["tool_calls"][0]
@@ -169,11 +222,9 @@ class WorkerAuditor:
             result = execute_tool('edit_file', args_dict)
             log_event(logger, "WORKER_MD_UPDATE", node_id=ctx.owner_id, args=args_dict, result=result)
 
-
-    def analyze_failure(self, ctx: Context, skill_desc: str = "") -> dict:
+    def analyze_failure(self, ctx: Context, skill_desc: str, iteration: int) -> dict:
         """失败归因诊断：判断是模型智商不够还是 Skill 能力缺失"""
         original_intent = ctx.packets[0].content
-        # 提取执行轨迹，用于分析到底卡在哪里
         trace_summary = "\n".join([f"[{p.message_role.value}]: {p.content[:200]}..." for p in ctx.packets[1:]])
 
         prompt = f'【初始任务】：{original_intent}\n【执行轨迹概要】：\n{trace_summary}\n【当前使用的 Skill 描述】：\n{skill_desc}'
@@ -195,20 +246,20 @@ class WorkerAuditor:
         self._record_llm_cost(ctx, resp)
 
         res_dict = extract_json(resp.content)
-        # 兼容性兜底
+        self._save_audit_log(ctx, "analyze_failure", system_prompt, prompt, resp, iteration, res_dict)
+        
         if "attribution" not in res_dict:
-            return self.analyze_failure(ctx, skill_desc) # 重新分析一次，给模型一个机会修正格式问题
+            return self.analyze_failure(ctx, skill_desc, iteration) 
         
         if res_dict.get("attribution") == "model" and res_dict.get("failure_reason"):
-            self.update_worker(ctx, res_dict.get("failure_reason"))
+            self.update_worker(ctx, res_dict.get("failure_reason"), iteration)
 
         log_event(logger, "AUDIT_FAILURE_ANALYSIS", node_id=ctx.owner_id, result=res_dict)
         return res_dict
 
-    def need_continue(self, ctx: Context, skill_desc: str = "") -> dict:
+    def need_continue(self, ctx: Context, skill_desc: str, iteration: int) -> dict:
         """判断是否继续进行，skill不行就算了，模型不行就换模型继续"""
         original_intent = ctx.packets[0].content
-        # 提取执行轨迹，用于分析到底卡在哪里
         trace_summary = "\n".join([f"[{p.message_role.value}]: {p.content[:200]}..." for p in ctx.packets[1:]])
 
         prompt = f'【初始任务】：{original_intent}\n【执行轨迹概要】：\n{trace_summary}\n【当前使用的 Skill 描述】：\n{skill_desc}'
@@ -230,14 +281,15 @@ class WorkerAuditor:
         self._record_llm_cost(ctx, resp)
 
         res_dict = extract_json(resp.content)
-        # 兼容性兜底
+        self._save_audit_log(ctx, "need_continue", system_prompt, prompt, resp, iteration, res_dict)
+        
         if "attribution" not in res_dict:
-            return self.need_continue(ctx, skill_desc) # 重新分析一次，给模型一个机会修正格式问题
+            return self.need_continue(ctx, skill_desc, iteration) 
 
         log_event(logger, "AUDIT_FAILURE_ANALYSIS", node_id=ctx.owner_id, attribution=res_dict.get("attribution", 'unknown'))
         return res_dict
     
-    def update_model(self, ctx: Context, is_passed: bool, failure_reason: str) -> float:
+    def update_model(self, ctx: Context, is_passed: bool, failure_reason: str, iteration: int) -> float:
         actual_complexity = ctx.complexity
         config = self.llm_config_loader.load()
         current_model_ref = ctx.model_id
@@ -245,44 +297,44 @@ class WorkerAuditor:
         provider_conf, current_model = config.get_model(current_model_ref)
         
         if not current_model:
-            return current_model_ref # 找不到则兜底返回原样
+            return current_model_ref 
             
-        # 1. 计算分数增减
         score_diff = 0.0
         if is_passed and actual_complexity > current_model.capability_score:
-            score_diff = 0.1 # 小马拉大车成功，加分
+            score_diff = 0.1 
             log_event(logger, "MODEL_PERFORMANCE_UP", node_id=ctx.owner_id, model=current_model_ref, score=current_model.capability_score, score_diff=score_diff)
         elif not is_passed and actual_complexity < current_model.capability_score:
-            score_diff = -0.2 # 杀鸡用牛刀失败，重扣
+            score_diff = -0.2 
             log_event(logger, "MODEL_PERFORMANCE_DOWN", node_id=ctx.owner_id, model=current_model_ref, score=current_model.capability_score, score_diff=score_diff, failure_reason=failure_reason)
             
         if score_diff != 0:
             current_model.capability_score = max(1.0, min(5.0, current_model.capability_score + score_diff))
             
-        # 2. 动态更新模型能力描述
         if not is_passed:
             update_prompt = f"""原描述：{current_model.description} , 失败原因：{failure_reason}"""
+            system_prompt = "这个模型执行任务失败了，请根据失败原因，找出这个模型不擅长的方向，并把这个信息浓缩成一个标签更新到模型描述里。\n直接返回纯文本的新描述，尽量不超过15字，不要任何解释。"
+            
             eval_ctx = self._create_eval_context(ctx, update_prompt)
-            desc_resp = call_llm(eval_ctx, system_prompt="这个模型执行任务失败了，请根据失败原因，找出这个模型不擅长的方向，并把这个信息浓缩成一个标签更新到模型描述里。\n直接返回纯文本的新描述，尽量不超过15字，不要任何解释。", json_mode=False)
+            desc_resp = call_llm(eval_ctx, system_prompt=system_prompt, json_mode=False)
             self._record_llm_cost(ctx, desc_resp)
+            self._save_audit_log(ctx, "update_model_desc", system_prompt, update_prompt, desc_resp, iteration)
+            
             current_model.description = desc_resp.content.strip()
 
-        # 尝试保存配置更新
         p_name = self.llm_config_loader.get_provider_name(provider_conf)
         if p_name:
             self.llm_config_loader.upsert_model(p_name, current_model)
         
         return score_diff
 
-
-    def decide_next_model(self, ctx: Context) -> str:
+    def decide_next_model(self, ctx: Context):
         """HR 调度中心：算分、更新模型画像、挑选最便宜且胜任的模型"""
         current_model_ref = ctx.model_id
 
         best_model_ref = current_model_ref
         lowest_cost = float('inf')
         
-        config = self.llm_config_loader.load() # 获取最新状态
+        config = self.llm_config_loader.load() 
         for p_key, p_val in config.providers.items():
             for m in p_val.models:
                 if not m.enabled: continue
@@ -294,35 +346,49 @@ class WorkerAuditor:
                         
         ctx.model_id = best_model_ref
 
-
-    def compress_context(self, ctx: Context, failure_reason: str = ""):
-        """压缩上下文：
-        1. 识别出哪些步骤是无用的（如多余的 communicate_with_downstream，没反馈的 communicate_with_upstream，没反馈的工具调用等），哪些步骤是有价值的（如真正闭环了的工具调用，来自上游的补充信息等）
-        2. 调用大模型压缩闭环的消息，提取有价值的信息，丢弃无用的过程
-        3. 对于未闭环的工具调用，保留其关键信息（如工具名称、参数等），并将它们合并成一条消息，保留给模型作为下一次迭代的线索
-        4. 注入失败原因（如果有的话），让模型明确知道上次失败的原因，避免继续在同一个问题上浪费资源，直接触发思考调整策略"""
+    def compress_context(self, ctx: Context, iteration: int, failure_reason: str = ""):
+        """压缩上下文"""
         import copy
+        import shutil
+        import os
         
         if len(ctx.packets) <= 1:
             return
-
-        downstream_ids = set(ctx.sub_agent.values()) if ctx.sub_agent else set()
         
-        # 判断是否收到了上游的补充信息 (即来自非下游的 EXTRA 消息)
+        if getattr(ctx, "work_dir", None):
+            backup_dir = os.path.join(ctx.work_dir, "audits")
+            os.makedirs(backup_dir, exist_ok=True)
+            
+            try:
+                # 统计已有的备份文件数量来决定新文件的后缀数字
+                existing_backups = [f for f in os.listdir(backup_dir) if f.startswith("context_before_compress_") and f.endswith(".json")]
+                next_num = len(existing_backups) + 1
+                backup_file = os.path.join(backup_dir, f"context_before_compress_{next_num}.json")
+                
+                # 原始上下文文件路径 (在工作区根目录下)
+                original_file = os.path.join(ctx.work_dir, f"{ctx.owner_id}_context.json")
+                
+                # 直接复制并重命名
+                if os.path.exists(original_file):
+                    shutil.copy2(original_file, backup_file)
+                else:
+                    logger.warning(f"Original context file not found for backup: {original_file}")
+            except Exception as e:
+                logger.error(f"Failed to backup context before compression: {e}")
+
+        node = self.task_manager.get_node(ctx.owner_id)
+        downstream_ids = set(node.children_ids) if node else set()
+        
         has_reply_from_upstream = any(
             m.message_type == MessageType.EXTRA and m.sender_id not in downstream_ids 
             for m in ctx.packets[1:]
         )
 
         actions_to_compress = []
-        unclosed_assistant_msgs = [] # 存放被修改过（只含未闭环 tool_call）的 ASSISTANT 消息
+        unclosed_assistant_msgs = []
         unclosed_tool_tc_ids = set()
 
-        # ==========================================
-        # 1. 遍历消息，分离已闭环(需压缩)和未闭环(需保留)的内容
-        # ==========================================
         for msg in ctx.packets[1:]:
-            # A. 处理 ASSISTANT 的 tool_calls
             if msg.message_role == MessageRole.ASSISTANT and msg.data and "tool_calls" in msg.data:
                 unclosed_tcs_for_this_msg = []
                 
@@ -332,34 +398,26 @@ class WorkerAuditor:
                     tc_id = tc.get("id")
                     args_json = extract_json(args)
 
-                    tc_id = tc.get("id")
-
                     if name == "communicate_with_downstream":
-                        # 发送的 communicate_with_downstream 不需要保留，直接丢弃
                         continue
                         
                     elif name == "communicate_with_upstream":
-                        # 发送的 communicate_with_upstream 如果没收到回复则压缩，收到回复则丢弃
                         if not has_reply_from_upstream:
                             actions_to_compress.append(f"我向上游请求了信息：{args_json.get('send_info')}，未收到回复")
                             
                     elif name == "use_skill":
-                        # 根据 sub_agent 字典找到真实的下级 agent id，并寻找 REPORT 消息
-                        sub_agent_id = ctx.sub_agent.get(tc_id)
+                        sub_agent_id = self.task_manager.find_receiver_by_tool_call_id(tc_id)
                         report_msg = next(
                             (m for m in ctx.packets[1:] if m.message_type == MessageType.REPORT and m.sender_id == sub_agent_id), 
                             None
                         )
                         if report_msg:
-                            # 已闭环，提取真反馈进行压缩
                             actions_to_compress.append(f"我调用了skill：{args_json.get('skill_name')}，反馈是：{report_msg.content}")
                         else:
-                            # 未闭环，必须保留这个 tc
                             unclosed_tcs_for_this_msg.append(tc)
                             unclosed_tool_tc_ids.add(tc_id)
                             
                     else:
-                        # 本地工具，从后续的 TOOL role 中提取结果进行压缩
                         tool_msg = next(
                             (m for m in ctx.packets[1:] if m.message_role == MessageRole.TOOL and m.tool_call_id == tc_id), 
                             None
@@ -367,26 +425,18 @@ class WorkerAuditor:
                         if tool_msg:
                             actions_to_compress.append(f"我调用了工具{name}，参数：{args}，反馈是：{tool_msg.content}")
 
-                # 如果这个 ASSISTANT 消息里有未闭环的 tool_call，则进行“手术”修改并保留
                 if unclosed_tcs_for_this_msg:
-                    new_msg = msg.model_copy() # 拷贝原有消息体
+                    new_msg = msg.model_copy()
                     new_msg.data = copy.deepcopy(msg.data)
-                    # 仅保留未闭环的 tool_calls
                     new_msg.data["tool_calls"] = unclosed_tcs_for_this_msg 
                     unclosed_assistant_msgs.append(new_msg)
 
-            # B. 处理系统和异步传递的 EXTRA 消息
             elif msg.message_type == MessageType.EXTRA:
                 if msg.sender_id in downstream_ids:
-                    # 收到的 communicate_with_upstream (来自下游求助) -> 丢弃
                     continue
                 else:
-                    # 收到的 communicate_with_downstream (来自上游回复) -> 加入压缩列表
                     actions_to_compress.append(f"收到了上游的补充信息，内容是：{msg.content}")
 
-        # ==========================================
-        # 2. 使用大模型进行极致压缩
-        # ==========================================
         compressed_summary = ""
         if actions_to_compress:
             actions_str = "\n".join(actions_to_compress)
@@ -398,47 +448,39 @@ class WorkerAuditor:
             eval_ctx = self._create_eval_context(ctx, actions_str)
             resp = call_llm(eval_ctx, system_prompt=system_prompt)
             self._record_llm_cost(ctx, resp)
+            
             compressed_summary = resp.content.strip()
+            self._save_audit_log(ctx, "compress_context", system_prompt, actions_str, resp, iteration, {"compressed_summary": compressed_summary})
 
-        # ==========================================
-        # 3. 重新组装 ctx.packets (严格保证 API 结构)
-        # ==========================================
-        new_packets = [ctx.packets[0]] # 永远保留第一条原始任务意图
+        new_packets = [ctx.packets[0]] 
 
-        # 1) 插入压缩摘要
         if compressed_summary:
             summary_msg = Message(
-                sender_id=ctx.owner_id,       # 替换 trace
-                send_type=SendType.SELF,      # 补齐必备字段
+                sender_id=ctx.owner_id,
+                send_type=SendType.SELF,
                 sender=Component.AUDITOR,
                 message_role=MessageRole.ASSISTANT,
                 content=f"【前置执行轨迹摘要】\n{compressed_summary}"
             )
             new_packets.append(summary_msg)
 
-        # 2) 拼接未闭环的 ASSISTANT 消息，以及它对应的假反馈 TOOL 消息
         if unclosed_assistant_msgs:
-            # 以第一条未闭环消息为基底
             merged_msg = unclosed_assistant_msgs[0].model_copy()
             merged_msg.data = copy.deepcopy(merged_msg.data)
             
             all_unclosed_tcs = []
             merged_contents = []
             
-            # 汇总所有未闭环的 tool_calls 和文本内容
             for msg in unclosed_assistant_msgs:
                 all_unclosed_tcs.extend(msg.data["tool_calls"])
                 if msg.content:
                     merged_contents.append(msg.content)
             
-            # 覆写合并后的数据
             merged_msg.data["tool_calls"] = all_unclosed_tcs
             merged_msg.content = "\n".join(merged_contents) if merged_contents else ""
             
-            # 插入合并后的单一 ASSISTANT 消息
             new_packets.append(merged_msg)
             
-            # 紧接着依序插入所有对应的 TOOL 返回消息
             for tc in all_unclosed_tcs:
                 tc_id = tc["id"]
                 tool_msg = next((m for m in ctx.packets[1:] if m.message_role == MessageRole.TOOL and m.tool_call_id == tc_id), None)
@@ -446,39 +488,33 @@ class WorkerAuditor:
                     new_packets.append(tool_msg)
 
         if failure_reason:
-            # 3) 注入失败原因，作为下一次思考的触发点
             feedback_msg = Message(
-                sender_id=ctx.owner_id,       # 替换 trace
-                send_type=SendType.SELF,      # 补齐必备字段
+                sender_id=ctx.owner_id,
+                send_type=SendType.SELF,
                 sender=Component.AUDITOR,
                 message_role=MessageRole.USER,
                 content=f"【系统审计反馈】：上次尝试未成功，原因为：{failure_reason}。请你调整策略重新尝试。"
             )
             new_packets.append(feedback_msg)
 
-        # 覆盖历史完成压缩
         ctx.packets = new_packets
 
-    # --- 暴露给 Worker 的高层接口 ---
-    
     def run_finish_audit(self, ctx: Context, skill_content: str, iteration: int) -> Tuple[bool, bool, Context]:
         """场景一：长期迭代任务结束时调用"""
-        audit_res = self.audit_task(ctx)
-        self.calculate_complexity(ctx)
+        audit_res = self.audit_task(ctx, iteration)
+        self.calculate_complexity(ctx, iteration)
         
         if audit_res.get("is_passed") and audit_res.get("have_verified"):
-            ## 任务通过且自我验证了，直接更新模型能力
-            self.update_model(ctx, True, "")
+            self.update_model(ctx, True, "", iteration)
             self._update_attempt(ctx, NodeStatus.COMPLETED, feedback="任务通过且完成自我验证", iteration=iteration)
             return True, True, ctx
         elif audit_res.get("is_passed") and not audit_res.get("have_verified"):
-            ## 任务通过但未自我验证，先不更新模型能力分，直接让模型继续迭代，并注入提示让它这次一定要验证交付物
             if len(ctx.packets) > 12:     
-                self.compress_context(ctx,failure_reason)
+                self.compress_context(ctx, iteration)
             self._update_attempt(ctx, NodeStatus.RUNNING, feedback="任务未自我验证", add_new=True, iteration=iteration)
             return True, False, ctx
         
-        failure = self.analyze_failure(ctx, skill_content)
+        failure = self.analyze_failure(ctx, skill_content, iteration)
         failure_reason = failure.get("failure_reason", "未知原因")
         attribution = audit_res.get("attribution", "model")
         
@@ -486,20 +522,20 @@ class WorkerAuditor:
             self._update_attempt(ctx, NodeStatus.FAILED, attribution=False, feedback=failure_reason, iteration=iteration)
             return False, False, None
         else:
-            self.update_model(ctx, False, failure_reason)
+            self.update_model(ctx, False, failure_reason, iteration)
             self.decide_next_model(ctx)
 
         if len(ctx.packets) > 8:     
-            self.compress_context(ctx,failure_reason)
+            self.compress_context(ctx, iteration, failure_reason)
 
         self._update_attempt(ctx, NodeStatus.RUNNING, attribution=True, feedback=failure_reason, add_new=True, iteration=iteration)
         return False, False, ctx
 
     def run_timeout_audit(self, ctx: Context, skill_content: str, iteration: int) -> Tuple[bool, Context]:
         """场景二：超出循环次数时调用"""
-        failure = self.need_continue(ctx, skill_content)
+        failure = self.need_continue(ctx, skill_content, iteration)
         attribution = failure.get("attribution", True)        
-        self.calculate_complexity(ctx)
+        self.calculate_complexity(ctx, iteration)
         reason = failure.get("reason", "执行超时，可能由于逻辑循环或死胡同")
         if attribution == "skill":
             self._update_attempt(ctx, NodeStatus.FAILED, attribution=False, feedback=reason, iteration=iteration)
@@ -510,6 +546,6 @@ class WorkerAuditor:
                 self._update_attempt(ctx, NodeStatus.RUNNING, attribution=True, feedback="任务过于复杂,需要继续迭代", add_new=True, iteration=iteration)
                 return True, ctx
             else:
-                self.compress_context(ctx)
+                self.compress_context(ctx, iteration)
         self._update_attempt(ctx, NodeStatus.RUNNING, attribution=True, feedback=reason, add_new=True, iteration=iteration)
         return True, ctx
