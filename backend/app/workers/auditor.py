@@ -346,6 +346,23 @@ class WorkerAuditor:
                         
         ctx.model_id = best_model_ref
 
+
+    def _estimate_context_tokens(self, ctx: Context) -> int:
+        """
+        基于 UTF-8 字节长度的混合语言 Token 估算法。
+        1个汉字约3字节，1个英文约1字节。平均 3 个字节对应 1 个 Token。
+        """
+        total_bytes = 0
+        for p in ctx.packets:
+            if p.content:
+                total_bytes += len(p.content.encode('utf-8', errors='ignore'))
+            if p.data and "tool_calls" in p.data:
+                # 序列化为字符串后计算字节数
+                tool_calls_str = str(p.data["tool_calls"])
+                total_bytes += len(tool_calls_str.encode('utf-8', errors='ignore'))
+                
+        return total_bytes // 3
+    
     def compress_context(self, ctx: Context, iteration: int, failure_reason: str = ""):
         """压缩上下文"""
         import copy
@@ -384,11 +401,19 @@ class WorkerAuditor:
             for m in ctx.packets[1:]
         )
 
+        keep_count = 3
+        if len(ctx.packets) > keep_count + 1:
+            process_msgs = ctx.packets[1:-keep_count]
+            kept_msgs = ctx.packets[-keep_count:]
+        else:
+            process_msgs = []
+            kept_msgs = ctx.packets[1:]
+
         actions_to_compress = []
         unclosed_assistant_msgs = []
         unclosed_tool_tc_ids = set()
 
-        for msg in ctx.packets[1:]:
+        for msg in process_msgs:
             if msg.message_role == MessageRole.ASSISTANT and msg.data and "tool_calls" in msg.data:
                 unclosed_tcs_for_this_msg = []
                 
@@ -408,7 +433,7 @@ class WorkerAuditor:
                     elif name == "use_skill":
                         sub_agent_id = self.task_manager.find_receiver_by_tool_call_id(tc_id)
                         report_msg = next(
-                            (m for m in ctx.packets[1:] if m.message_type == MessageType.REPORT and m.sender_id == sub_agent_id), 
+                            (m for m in process_msgs if m.message_type == MessageType.REPORT and m.sender_id == sub_agent_id), 
                             None
                         )
                         if report_msg:
@@ -419,7 +444,7 @@ class WorkerAuditor:
                             
                     else:
                         tool_msg = next(
-                            (m for m in ctx.packets[1:] if m.message_role == MessageRole.TOOL and m.tool_call_id == tc_id), 
+                            (m for m in process_msgs if m.message_role == MessageRole.TOOL and m.tool_call_id == tc_id), 
                             None
                         )
                         if tool_msg:
@@ -483,9 +508,11 @@ class WorkerAuditor:
             
             for tc in all_unclosed_tcs:
                 tc_id = tc["id"]
-                tool_msg = next((m for m in ctx.packets[1:] if m.message_role == MessageRole.TOOL and m.tool_call_id == tc_id), None)
+                tool_msg = next((m for m in process_msgs if m.message_role == MessageRole.TOOL and m.tool_call_id == tc_id), None)
                 if tool_msg:
                     new_packets.append(tool_msg)
+                    
+        new_packets.extend(kept_msgs)
 
         if failure_reason:
             feedback_msg = Message(
@@ -509,7 +536,7 @@ class WorkerAuditor:
             self._update_attempt(ctx, NodeStatus.COMPLETED, feedback="任务通过且完成自我验证", iteration=iteration)
             return True, True, ctx
         elif audit_res.get("is_passed") and not audit_res.get("have_verified"):
-            if len(ctx.packets) > 12:     
+            if self._estimate_context_tokens(ctx) > 10000:    
                 self.compress_context(ctx, iteration)
             self._update_attempt(ctx, NodeStatus.RUNNING, feedback="任务未自我验证", add_new=True, iteration=iteration)
             return True, False, ctx
@@ -525,7 +552,7 @@ class WorkerAuditor:
             self.update_model(ctx, False, failure_reason, iteration)
             self.decide_next_model(ctx)
 
-        if len(ctx.packets) > 8:     
+        if self._estimate_context_tokens(ctx) > 8000:
             self.compress_context(ctx, iteration, failure_reason)
 
         self._update_attempt(ctx, NodeStatus.RUNNING, attribution=True, feedback=failure_reason, add_new=True, iteration=iteration)
@@ -545,7 +572,7 @@ class WorkerAuditor:
             if attribution == "task":
                 self._update_attempt(ctx, NodeStatus.RUNNING, attribution=True, feedback="任务过于复杂,需要继续迭代", add_new=True, iteration=iteration)
                 return True, ctx
-            else:
+            elif self._estimate_context_tokens(ctx) > 10000:
                 self.compress_context(ctx, iteration)
         self._update_attempt(ctx, NodeStatus.RUNNING, attribution=True, feedback=reason, add_new=True, iteration=iteration)
         return True, ctx

@@ -2,7 +2,7 @@
 
 # 🤖 evabot
 
-**A personal butler — focused on three things: making money, taking notes, and staying social**
+**A personal butler — Silently supporting your life in the background**
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-blue?style=flat-square&logo=python)](https://python.org)
 [![License](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
@@ -16,17 +16,6 @@
 
 
 ## 🌟 Project Vision
-
-### 💰 Making Money
-
-You know there are some income streams you could tap into — you just don't have the time to act on them.
-
-evabot wraps your logic into Skills and executes them while you sleep:
-until API costs are covered, until you're turning a profit.
-
-It's not a tool. It's an employee you hired to run your side hustle.
-
-
 
 ### 🗒️ Taking Notes
 

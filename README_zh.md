@@ -2,7 +2,7 @@
 
 # 🤖 evabot
 
-**面向超级个人的专属管家 —— 专注三件事：帮你赚钱、记事与社交**
+**面向超级个人的专属管家 —— 在后台默默支撑你的生活**
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-blue?style=flat-square&logo=python)](https://python.org)
 [![License](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
@@ -16,17 +16,6 @@
 
 
 ## 🌟 本项目愿景
-
-### 💰 赚钱
-
-你知道很多小钱可以赚，却没时间把它变成收益。
-
-evabot 把你的变现逻辑封装成 Skill，在你睡觉时帮你执行：
-直到 API 成本被覆盖，直到出现正向收益。
-
-它不是一个工具，它是你雇来跑副业的员工。
-
-
 
 ### 🗒️ 记事
 
