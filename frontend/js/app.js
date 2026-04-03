@@ -44,6 +44,39 @@ createApp({
         });
         const modelForm = ref(defaultModelForm());
 
+
+        // 渠道配置数据
+        // 1. 定义响应式变量
+        const channelConfig = ref({});
+        const notificationChannelsStr = ref('');
+        const knownChannels = ['feishu', 'telegram', 'qq', 'dingtalk', 'mochat', 'discord', 'slack', 'whatsapp', 'email', 'weixin'];
+        const isKnownChannel = (name) => knownChannels.includes(name);
+
+        // 2. 获取配置的函数
+        const fetchChannelConfig = async () => {
+            try {
+                // 解决强缓存：加时间戳
+                const res = await axios.get(`${API_BASE}/api/config/channels?_t=${Date.now()}`);
+                channelConfig.value = res.data;
+                notificationChannelsStr.value = (res.data.notification_channels || []).join(', ');
+            } catch (e) { 
+                console.error("获取渠道配置失败 (请检查 run.py 是否重启)", e); 
+            }
+        };
+
+        // 3. 保存配置的函数
+        const saveChannelConfig = async () => {
+            try {
+                const payload = JSON.parse(JSON.stringify(channelConfig.value));
+                payload.notification_channels = notificationChannelsStr.value.split(',').map(s => s.trim()).filter(Boolean);
+                const res = await axios.post(`${API_BASE}/api/config/channels`, payload);
+                alert(res.data.message || "渠道配置保存成功");
+                fetchChannelConfig();
+            } catch (e) { 
+                alert("渠道配置保存失败: " + (e.response?.data?.detail || e.message)); 
+            }
+        };
+
         // ==========================
         // 1. WebSocket
         // ==========================
@@ -321,6 +354,7 @@ createApp({
             loadHistory();
             initWebSocket();
             fetchConfig();
+            fetchChannelConfig();
             setTimeout(() => {
                 initECharts(); // 先初始化空表盘
                 fetchHistoryTasks(); // 再去拉取历史任务，拉完后会自动触发第一条任务的画图
@@ -337,7 +371,8 @@ createApp({
             llmConfig, updateDefault,
             showProvModal, isEditProv, provForm, openProviderModal, saveProvider, deleteProvider,
             showModelModal, isEditModel, currentProvForModel, modelForm, openModelModal, saveModel, deleteModel,
-            messageOffset, hasMoreMessages, isLoadingHistory, loadHistory, getArtifactUrl
+            messageOffset, hasMoreMessages, isLoadingHistory, loadHistory, getArtifactUrl,
+            channelConfig, notificationChannelsStr, isKnownChannel, fetchChannelConfig, saveChannelConfig
         };
     }
 }).mount('#app');

@@ -92,6 +92,16 @@ class ButlerService:
         2. 调用 LLM (传入 ctx 和 system_prompt)
         3. 路由结果
         """
+
+        # ================= 锁定触发源 =================
+        # 刚从队列中取出时，最后一条导致状态变更的消息即为触发源
+        trigger_msg = ctx.packets[-1] if ctx.packets else None
+        
+        # 提取用户的实际 ID (入站时的 sender_id) 和渠道来源
+        target_receiver_id = getattr(trigger_msg, "sender_id", ctx.owner_id) if trigger_msg else ctx.owner_id
+        target_channel = getattr(trigger_msg, "source_channel", None) if trigger_msg else None
+        # ==================================================
+
         iteration = 0
         max_iterations = 20  # 设置最大循环阈值，防止死循环
         
@@ -218,6 +228,8 @@ class ButlerService:
             else:
                 user_msg = Message(
                     message_role=MessageRole.ASSISTANT,
+                    receiver_id=target_receiver_id,   # 明确指定目标接收者
+                    source_channel=target_channel,
                     sender=Component.BUTLER,
                     sender_id=ctx.owner_id,
                     send_type=SendType.USER,                          

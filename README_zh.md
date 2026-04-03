@@ -152,7 +152,7 @@ evabot/
     │   └── power.py        # 技能树解析与管理器
     ├── logs/               # 系统运行日志归档
     ├── memory/             # 记忆层：历史存储、更新与检索
-    ├── llm/                # 大模型配置文件（llm.yaml）
+    ├── llm/                # 大模型配置
     └── workspace/          # 隔离工作区
 run.py                      # 系统启动入口
 

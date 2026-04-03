@@ -64,7 +64,7 @@ class ProviderConfig(BaseModel):
 # ==========================================
 # 2. 配置管理器 (核心)
 # ==========================================
-DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "llm.yaml")
+DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "llm_config.yaml")
 
 class LLMConfig(BaseModel):
     defaults: Dict[Component, str] = Field(default_factory=lambda: {
@@ -94,7 +94,7 @@ class LLMConfig(BaseModel):
 
     @classmethod
     def get_default_path(cls):
-        return os.path.join(os.path.dirname(__file__), "llm.yaml")
+        return os.path.join(os.path.dirname(__file__), "llm_config.yaml")
     
     @classmethod
     def load(cls) -> "LLMConfig":

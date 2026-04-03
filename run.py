@@ -18,6 +18,8 @@ from fastapi.staticfiles import StaticFiles
 # 将当前根目录加入系统路径，确保能够正确 import backend 包
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+from backend.app.channels.channel_config import ChannelRootConfig
+from backend.app.channels.manager import ChannelManager
 from backend.app.gateway.gateway import Gateway
 from backend.app.butler.butler import ButlerService
 from backend.app.solver.solver import SolverService
@@ -33,6 +35,7 @@ from backend.llm.llm_config import LLMConfig, ProviderConfig, ModelConfig
 gateway = Gateway()
 user_queue = queue.Queue()
 active_websockets: Dict[str, WebSocket] = {}
+channel_manager = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -48,9 +51,14 @@ async def lifespan(app: FastAPI):
     ButlerService(gateway)
     SolverService(gateway, power=power)
     WorkerService(gateway, power=power)
-    
+
+    # --- 新增：加载并启动全部渠道服务 ---
+    cfg = ChannelRootConfig.load()
+    channel_manager = ChannelManager(cfg, gateway)
+    await channel_manager.start_all()
+
     # 启动异步后台任务消费 user_queue
-    task = asyncio.create_task(listen_user_queue())
+    task = asyncio.create_task(listen_user_queue(channel_manager))
     
     print("✅ 系统启动完成！")
     print("🌐 正在唤起浏览器，或手动访问: http://127.0.0.1:8000")
@@ -69,6 +77,8 @@ async def lifespan(app: FastAPI):
     yield
     # 退出时清理
     task.cancel()
+    if channel_manager:
+        await channel_manager.stop_all()
 
 app = FastAPI(title="EvaBot", lifespan=lifespan)
 frontend_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
@@ -130,7 +140,7 @@ def get_chat_history(channel_id: str, offset: int = 0, limit: int = 10):
         "has_more": start > 0
     }
 
-async def listen_user_queue():
+async def listen_user_queue(c_manager: ChannelManager):
     """后台任务：监听发给用户的消息，并通过 WebSocket 推送给前端"""
     import queue # 确保文件顶部有 import queue
     while True:
@@ -140,12 +150,17 @@ async def listen_user_queue():
             
             if ctx.packets:
                 last_msg = ctx.packets[-1]
-                # 筛选出需要发给前端用户的消息
                 if last_msg.send_type == SendType.USER and last_msg.sender != Component.USER:
+                    
+                    # 1. Web端：全局大盘，所有消息强制推给所有的 WebSocket 监控
                     channel_id = last_msg.receiver_id or ctx.owner_id
                     if channel_id in active_websockets:
                         ws = active_websockets[channel_id]
                         await ws.send_json(last_msg.model_dump(mode="json"))
+                    
+                    # 2. 外部通信端：交给 ChannelManager 进行精准的路由分发
+                    if c_manager:
+                        await c_manager.dispatch_outbound(last_msg)
             user_queue.task_done()
             
         except queue.Empty:
@@ -294,6 +309,24 @@ def update_default(req: DefaultReq):
     res = cfg.update_default(req.role, req.llm_ref)
     if not res.success: raise HTTPException(status_code=400, detail=res.message)
     return {"success": True, "message": res.message}
+
+# ==========================================
+# 6. 渠道配置 API (Channel Config)
+# ==========================================
+@app.get("/api/config/channels")
+def get_channel_config():
+    cfg = ChannelRootConfig.load()
+    return cfg.model_dump(mode="json")
+
+@app.post("/api/config/channels")
+def save_channel_config(req: dict):
+    try:
+        # 使用传入的字典重构 Pydantic 模型，触发严谨的类型校验
+        cfg = ChannelRootConfig(**req)
+        cfg.save()
+        return {"success": True, "message": "渠道配置已保存！注意：部分长连接渠道的参数修改可能需要重启后端才能完全生效。"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -154,9 +154,8 @@ class Message(_Schema):
     data: dict | None = Field(default=None, description="可选：附加数据")
     status: Status = Field(default=Status.DONE, description="消息状态")
     source_channel: str | None = Field(default=None, description="可选：消息来源的外部渠道名称，如 'telegram', 'web'")
-    raw_message_id: str | None = Field(default=None, description="可选：外部渠道的原始消息ID，用于实现平台的引用回复功能")
     delivered: bool = Field(default=False, description="是否已成功投递给用户（结合 Context 实现离线重发补偿机制）")
-
+    name: str | None = Field(default=None, description="可选：发送方名称，如用户昵称或姓名")
 
 # ----------------------------
 # Context：上下文

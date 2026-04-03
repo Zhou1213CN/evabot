@@ -1,0 +1,108 @@
+feishu:
+  enabled: false
+  allow_from:
+  - '*'
+  app_id: ''
+  app_secret: ''
+  encrypt_key: ''
+  verification_token: ''
+  react_emoji: THUMBSUP
+telegram:
+  enabled: false
+  allow_from:
+  - '*'
+  token: ''
+  group_policy: mention
+  reply_to_message: false
+qq:
+  enabled: false
+  allow_from:
+  - '*'
+  app_id: ''
+  secret: ''
+dingtalk:
+  enabled: false
+  allow_from:
+  - '*'
+  client_id: ''
+  client_secret: ''
+mochat:
+  enabled: false
+  allow_from:
+  - '*'
+  claw_token: ''
+  base_url: ''
+  socket_path: /socket.io
+  sessions: []
+  panels: []
+  socket_disable_msgpack: false
+  max_retry_attempts: 10
+  socket_reconnect_delay_ms: 1000
+  socket_max_reconnect_delay_ms: 5000
+  socket_connect_timeout_ms: 20000
+  watch_limit: 50
+  refresh_interval_ms: 60000
+  watch_timeout_ms: 30000
+  retry_delay_ms: 5000
+  reply_delay_ms: 0
+discord:
+  enabled: false
+  allow_from:
+  - '*'
+  token: ''
+  gateway_url: wss://gateway.discord.gg/?v=10&encoding=json
+  intents: 33280
+  group_policy: mention
+slack:
+  enabled: false
+  allow_from:
+  - '*'
+  bot_token: ''
+  app_token: ''
+  mode: socket
+  reply_in_thread: true
+  react_emoji: eyes
+  group_policy: mention
+  group_allow_from: []
+  dm:
+    enabled: true
+    policy: allowlist
+    allow_from: []
+whatsapp:
+  enabled: false
+  allow_from:
+  - '*'
+  bridge_url: ws://localhost:3000
+email:
+  enabled: false
+  allow_from:
+  - '*'
+  consent_granted: false
+  poll_interval_seconds: 10
+  auto_reply_enabled: true
+  subject_prefix: 'Re: '
+  max_body_chars: 10000
+  mark_seen: true
+  imap_host: ''
+  imap_port: 993
+  imap_use_ssl: true
+  imap_username: ''
+  imap_password: ''
+  imap_mailbox: INBOX
+  smtp_host: ''
+  smtp_port: 465
+  smtp_use_ssl: true
+  smtp_use_tls: false
+  smtp_username: ''
+  smtp_password: ''
+  from_address: ''
+weixin:
+  enabled: false
+  allow_from:
+  - '*'
+  base_url: https://ilinkai.weixin.qq.com
+  cdn_base_url: https://novac2c.cdn.weixin.qq.com/c2c
+  token: ''
+  state_dir: ''
+  poll_timeout: 35
+notification_channels: []

@@ -12,6 +12,7 @@ utils.py
 import json
 from datetime import datetime, timezone
 import os
+from pathlib import Path
 import re
 from typing import List
 import uuid
@@ -92,3 +93,20 @@ def format_artifacts(artifacts: List) -> str:
         lines.append(f"{uri}: {desc}")
         
     return "\n".join(lines)
+
+
+def get_media_dir(channel_name: str) -> Path:
+    """
+    获取并确保存在指定渠道（或来源）的媒体文件存储目录。
+    统一存储在 evabot 的 backend/workspace/media/<channel_name> 目录下。
+    
+    :param channel_name: 渠道名称，例如 'feishu', 'telegram', 'web' 等
+    :return: Path 对象，指向该渠道专属的媒体物理目录
+    """
+    # 以当前 utils.py 所在目录为基准，定位到 backend/workspace/media
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../workspace/media'))
+    media_dir = Path(base_dir) / channel_name
+    
+    # 递归创建目录（如果不存在的话）
+    media_dir.mkdir(parents=True, exist_ok=True)
+    return media_dir

@@ -151,7 +151,7 @@ evabot/
     │   └── power.py        # Skill tree parser and manager
     ├── logs/               # System runtime log archive
     ├── memory/             # Memory layer: history storage, updates, and retrieval
-    ├── llm/                # LLM configuration file (llm.yaml)
+    ├── llm/                # LLM configuration
     └── workspace/          # Isolated workspace
 run.py                      # System entry point
 
