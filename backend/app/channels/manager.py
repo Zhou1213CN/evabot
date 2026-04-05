@@ -24,6 +24,7 @@ class ChannelManager:
         self.config = config
         self.gateway = gateway
         self.channels: Dict[str, BaseChannel] = {}
+        self._active_tasks = []
 
         # 之后我们会在 config 解析部分完成这里的映射
         self._init_channels()
@@ -67,18 +68,27 @@ class ChannelManager:
             logger.error(f"启动渠道 {name} 失败: {e}")
 
     async def start_all(self) -> None:
-        """启动所有挂载的渠道"""
+        """启动所有在配置中启用(enabled: true)且已挂载的渠道"""
         if not self.channels:
-            logger.warning("未检测到启用的外部通信渠道。")
+            logger.warning("未检测到任何已挂载的外部通信渠道。")
             return
 
         tasks = []
         for name, channel in self.channels.items():
-            logger.info(f"正在启动外部渠道: {name} ...")
-            tasks.append(asyncio.create_task(self._start_channel(name, channel)))
+            # 获取该渠道对应的配置对象
+            ch_config = getattr(self.config, name, None)
+            
+            # 二次校验：只有配置中 enabled 为 True 的才启动
+            if ch_config and getattr(ch_config, 'enabled', False):
+                logger.info(f"正在启动外部渠道: {name} ...")
+                tasks.append(asyncio.create_task(self._start_channel(name, channel)))
+            else:
+                logger.info(f"跳过未启用的渠道: {name}")
 
-        # 挂起运行
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if tasks:
+            self._active_tasks.extend(tasks)
+        else:
+            logger.warning("没有需要启动的已启用渠道。")
 
     async def stop_all(self) -> None:
         """停止所有渠道"""
@@ -121,4 +131,51 @@ class ChannelManager:
     def enabled_channels(self) -> List[str]:
         """获取已启用的渠道列表"""
         return list(self.channels.keys())
+    
+
+    async def reload_from_config(self, cfg: Any) -> None:
+        """动态重载渠道配置"""
+        self.config = cfg
+        channel_classes = {
+            "feishu": ("backend.app.channels.feishu", "FeishuChannel"),
+            "telegram": ("backend.app.channels.telegram", "TelegramChannel"),
+            "dingtalk": ("backend.app.channels.dingtalk", "DingTalkChannel"),
+            "qq": ("backend.app.channels.qq", "QQChannel"),
+            "discord": ("backend.app.channels.discord", "DiscordChannel"),
+            "slack": ("backend.app.channels.slack", "SlackChannel"),
+            "whatsapp": ("backend.app.channels.whatsapp", "WhatsAppChannel"),
+            "email": ("backend.app.channels.email", "EmailChannel"),
+            "weixin": ("backend.app.channels.weixin", "WeixinChannel"),
+            "mochat": ("backend.app.channels.mochat", "MochatChannel"),
+        }
+
+        for ch_name, (module_path, class_name) in channel_classes.items():
+            ch_config = getattr(cfg, ch_name, None)
+            is_enabled = getattr(ch_config, 'enabled', False) if ch_config else False
+            
+            if is_enabled and ch_name not in self.channels:
+                # 动态启动新启用的渠道
+                try:
+                    import importlib
+                    module = importlib.import_module(module_path)
+                    ChannelClass = getattr(module, class_name)
+                    new_channel = ChannelClass(ch_config, self.gateway)
+                    self.channels[ch_name] = new_channel
+                    import asyncio
+                    asyncio.create_task(self._start_channel(ch_name, new_channel))
+                    logger.info(f"动态挂载并启动渠道 [{ch_name}]")
+                except Exception as e:
+                    logger.error(f"动态加载渠道 [{ch_name}] 失败: {e}")
+            elif not is_enabled and ch_name in self.channels:
+                # 动态卸载被禁用的渠道
+                old_channel = self.channels.pop(ch_name)
+                try:
+                    import asyncio
+                    await old_channel.stop()
+                    logger.info(f"动态卸载渠道 [{ch_name}]")
+                except Exception as e:
+                    logger.error(f"停止渠道 [{ch_name}] 失败: {e}")
+            elif is_enabled and ch_name in self.channels:
+                # 渠道已经在运行，更新其内部配置对象
+                self.channels[ch_name].config = ch_config
     

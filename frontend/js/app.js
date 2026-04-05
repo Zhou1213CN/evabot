@@ -72,8 +72,61 @@ createApp({
                 const res = await axios.post(`${API_BASE}/api/config/channels`, payload);
                 alert(res.data.message || "渠道配置保存成功");
                 fetchChannelConfig();
+
+                // 干净的触发逻辑
+                if (payload.weixin && payload.weixin.enabled) {
+                    isPollingWeixin.value = false; // 先切断可能存在的老递归
+                    setTimeout(() => {
+                        isPollingWeixin.value = true; // 打开绿灯
+                        pollWeixinQr(0); // 踢出第一脚，之后全靠它自己递归
+                    }, 500);
+                } else {
+                    isPollingWeixin.value = false; // 没启用就锁死
+                    weixinQrUrl.value = '';
+                }
             } catch (e) { 
                 alert("渠道配置保存失败: " + (e.response?.data?.detail || e.message)); 
+            }
+        };
+
+        // --- 微信轮询专属状态 ---
+        const weixinQrUrl = ref('');
+        const isPollingWeixin = ref(false); // 使用严格的布尔锁，代替定时器 ID
+
+        // 递归轮询函数（单线递推，绝不产生重叠定时器）
+        const pollWeixinQr = async (retryCount = 0) => {
+            // 终止条件 1：锁被外部关闭（如切换页面或取消勾选）
+            if (!isPollingWeixin.value) return; 
+            
+            // 终止条件 2：超时防死循环（最多尝试 30 次，约 90 秒）
+            if (retryCount > 30) {
+                isPollingWeixin.value = false;
+                return;
+            }
+
+            try {
+                const res = await axios.get(`${API_BASE}/api/channels/weixin/qr?_t=${Date.now()}`);
+                
+                if (res.data.qr_url) {
+                    // 拿到二维码，更新 UI
+                    weixinQrUrl.value = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(res.data.qr_url)}`;
+                    // 只要还有二维码，就重置重试次数，并在 3 秒后递归调用自己
+                    setTimeout(() => pollWeixinQr(0), 3000);
+                } else {
+                    // 场景 A：之前有二维码，现在突然变空了 -> 扫码成功
+                    if (weixinQrUrl.value) {
+                        weixinQrUrl.value = '';
+                        isPollingWeixin.value = false; // 彻底拔掉轮询的电源
+                        alert("微信扫码授权成功！已建立底层长连接。");
+                        return; // 直接 return，物理切断递归调用链
+                    }
+                    
+                    // 场景 B：本来就是空的（比如刚点开启，后端还在向微信请求阶段）
+                    setTimeout(() => pollWeixinQr(retryCount + 1), 3000);
+                }
+            } catch (e) {
+                // 遇到网络异常不立刻死掉，而是延缓重试节奏
+                setTimeout(() => pollWeixinQr(retryCount + 1), 5000); 
             }
         };
 
@@ -372,7 +425,7 @@ createApp({
             showProvModal, isEditProv, provForm, openProviderModal, saveProvider, deleteProvider,
             showModelModal, isEditModel, currentProvForModel, modelForm, openModelModal, saveModel, deleteModel,
             messageOffset, hasMoreMessages, isLoadingHistory, loadHistory, getArtifactUrl,
-            channelConfig, notificationChannelsStr, isKnownChannel, fetchChannelConfig, saveChannelConfig
+            channelConfig, notificationChannelsStr, isKnownChannel, fetchChannelConfig, saveChannelConfig, weixinQrUrl
         };
     }
 }).mount('#app');

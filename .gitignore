@@ -6,3 +6,4 @@ backend/logs/*
 backend/memory/*
 !backend/memory/.keep
 backend/app/channels/channel_config.yaml
+backend/app/channels/.cache/*

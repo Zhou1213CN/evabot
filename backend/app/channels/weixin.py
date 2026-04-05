@@ -39,6 +39,9 @@ logger = get_logger("channels.weixin")
 # ---------------------------------------------------------------------------
 # Protocol constants (from openclaw-weixin types.ts)
 # ---------------------------------------------------------------------------
+# 定义纯状态缓存的隐藏路径
+CACHE_DIR = Path(__file__).parent / ".cache"
+STATE_FILE = CACHE_DIR / "weixin.state"
 
 # MessageItemType
 ITEM_TEXT = 1
@@ -150,6 +153,8 @@ class WeixinChannel(BaseChannel):
         self._next_poll_timeout_s: int = DEFAULT_LONG_POLL_TIMEOUT_S
         self._session_pause_until: float = 0.0
         self._typing_tickets: dict[str, dict[str, Any]] = {}
+        self.current_qr_url = ""
+        os.makedirs(CACHE_DIR, exist_ok=True)
 
     # ------------------------------------------------------------------
     # State persistence
@@ -165,44 +170,68 @@ class WeixinChannel(BaseChannel):
         d.mkdir(parents=True, exist_ok=True)
         self._state_dir = d
         return d
+    
+    def _load_cache_state(self):
+        """仅加载高频变动的游标和会话密钥"""
+        if STATE_FILE.exists():
+            try:
+                with open(STATE_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self._get_updates_buf = data.get("get_updates_buf", "")
+                    self._context_tokens = data.get("context_tokens", {})
+                logger.info(f"成功从 {STATE_FILE} 加载微信状态缓存")
+            except Exception as e:
+                logger.warning(f"读取微信状态缓存失败: {e}")
 
-    def _load_state(self) -> bool:
-        """Load saved account state. Returns True if a valid token was found."""
-        state_file = self._get_state_dir() / "account.json"
-        if not state_file.exists():
-            return False
-        try:
-            data = json.loads(state_file.read_text())
-            self._token = data.get("token", "")
-            self._get_updates_buf = data.get("get_updates_buf", "")
-            context_tokens = data.get("context_tokens", {})
-            if isinstance(context_tokens, dict):
-                self._context_tokens = {
-                    str(user_id): str(token)
-                    for user_id, token in context_tokens.items()
-                    if str(user_id).strip() and str(token).strip()
-                }
-            else:
-                self._context_tokens = {}
-            base_url = data.get("base_url", "")
-            if base_url:
-                self.config.base_url = base_url
-            return bool(self._token)
-        except Exception:
-            return False
-
-    def _save_state(self) -> None:
-        state_file = self._get_state_dir() / "account.json"
+    def _save_cache_state(self):
+        """仅保存高频变动的游标和会话密钥"""
         try:
             data = {
-                "token": self._token,
-                "get_updates_buf": self._get_updates_buf,
-                "context_tokens": self._context_tokens,
-                "base_url": getattr(self.config, 'base_url', ''),
+                "get_updates_buf": self._get_updates_buf, 
+                "context_tokens": self._context_tokens 
             }
-            state_file.write_text(json.dumps(data, ensure_ascii=False))
-        except Exception:
-            pass
+            with open(STATE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"保存微信状态缓存失败: {e}")
+
+    # def _load_state(self) -> bool:
+    #     """Load saved account state. Returns True if a valid token was found."""
+    #     state_file = self._get_state_dir() / "account.json"
+    #     if not state_file.exists():
+    #         return False
+    #     try:
+    #         data = json.loads(state_file.read_text())
+    #         self._token = data.get("token", "")
+    #         self._get_updates_buf = data.get("get_updates_buf", "")
+    #         context_tokens = data.get("context_tokens", {})
+    #         if isinstance(context_tokens, dict):
+    #             self._context_tokens = {
+    #                 str(user_id): str(token)
+    #                 for user_id, token in context_tokens.items()
+    #                 if str(user_id).strip() and str(token).strip()
+    #             }
+    #         else:
+    #             self._context_tokens = {}
+    #         base_url = data.get("base_url", "")
+    #         if base_url:
+    #             self.config.base_url = base_url
+    #         return bool(self._token)
+    #     except Exception:
+    #         return False
+
+    # def _save_state(self) -> None:
+    #     state_file = self._get_state_dir() / "account.json"
+    #     try:
+    #         data = {
+    #             "token": self._token,
+    #             "get_updates_buf": self._get_updates_buf,
+    #             "context_tokens": self._context_tokens,
+    #             "base_url": getattr(self.config, 'base_url', ''),
+    #         }
+    #         state_file.write_text(json.dumps(data, ensure_ascii=False))
+    #     except Exception:
+    #         pass
 
     # ------------------------------------------------------------------
     # HTTP helpers  (matches api.ts buildHeaders / apiFetch)
@@ -308,7 +337,8 @@ class WeixinChannel(BaseChannel):
         try:
             refresh_count = 0
             qrcode_id, scan_url = await self._fetch_qr_code()
-            self._print_qr_code(scan_url)
+            self.current_qr_url = scan_url
+            # self._print_qr_code(scan_url)
             current_poll_base_url = self.config.base_url
 
             while self._running:
@@ -331,20 +361,29 @@ class WeixinChannel(BaseChannel):
 
                 status = status_data.get("status", "")
                 if status == "confirmed":
+                    self.current_qr_url = "" # 登录成功，清除二维码
                     token = status_data.get("bot_token", "")
-                    bot_id = status_data.get("ilink_bot_id", "")
                     base_url = status_data.get("baseurl", "")
-                    user_id = status_data.get("ilink_user_id", "")
+                    
                     if token:
                         self._token = token
-                        if base_url:
-                            self.config.base_url = base_url
-                        self._save_state()
-                        logger.info(f"WeChat login successful! bot_id={bot_id} user_id={user_id}")
+                        self.config.base_url = base_url
+                        
+                        # 1. 静态凭据落地到 channel_config.yaml
+                        try:
+                            from backend.app.channels.channel_config import ChannelRootConfig
+                            root_cfg = ChannelRootConfig.load()
+                            root_cfg.weixin.token = token
+                            root_cfg.weixin.base_url = base_url
+                            root_cfg.weixin.enabled = True
+                            root_cfg.save()
+                            logger.info("微信 Token 与 BaseURL 已成功落地至 channel_config.yaml")
+                        except Exception as e:
+                            logger.error(f"YAML 落地失败: {e}")
+                            
+                        # 2. 初始化隐藏的 cache 状态文件
+                        self._save_cache_state()
                         return True
-                    else:
-                        logger.error("Login confirmed but no bot_token in response")
-                        return False
                 elif status == "scaned_but_redirect":
                     redirect_host = str(status_data.get("redirect_host", "") or "").strip()
                     if redirect_host:
@@ -357,13 +396,15 @@ class WeixinChannel(BaseChannel):
                 elif status == "expired":
                     refresh_count += 1
                     if refresh_count > MAX_QR_REFRESH_COUNT:
+                        self.current_qr_url = ""
                         logger.warning(
                             f"QR code expired too many times ({refresh_count - 1}/{MAX_QR_REFRESH_COUNT}), giving up."
                         )
                         return False
                     qrcode_id, scan_url = await self._fetch_qr_code()
+                    self.current_qr_url = scan_url
                     current_poll_base_url = self.config.base_url
-                    self._print_qr_code(scan_url)
+                    # self._print_qr_code(scan_url)
                     continue
 
                 await asyncio.sleep(1)
@@ -406,7 +447,7 @@ class WeixinChannel(BaseChannel):
             state_file = self._get_state_dir() / "account.json"
             if state_file.exists():
                 state_file.unlink()
-        if self._token or self._load_state():
+        if self._token or self._load_cache_state():
             return True
 
         self._client = httpx.AsyncClient(
@@ -423,18 +464,25 @@ class WeixinChannel(BaseChannel):
                 self._client = None
 
     async def start(self) -> None:
-        self._running = True
-        self._next_poll_timeout_s = getattr(self.config, 'poll_timeout', DEFAULT_LONG_POLL_TIMEOUT_S)
+        # 必须在第一步就设置为 True，否则 _qr_login 会瞬间判定死亡并退出！
+        self._running = True  
+        self._next_poll_timeout_s = getattr(self.config, 'poll_timeout', 35)
+        
+        # 必须提早初始化 HTTP 客户端，否则获取二维码的请求会因为空指针直接崩溃！
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(self._next_poll_timeout_s + 10, connect=30),
             follow_redirects=True,
         )
 
+        # 1. 验证 YAML 是否已有 Token
         if getattr(self.config, 'token', ''):
             self._token = self.config.token
-        elif not self._load_state():
+            logger.info("检测到 YAML 中已配置 Token，跳过扫码流程。")
+            self._load_cache_state()
+        else:
+            # 2. 触发扫码（此时 _running 已为 True，不会闪退）
             if not await self._qr_login():
-                logger.error("WeChat login failed. Run 'evabot channels login weixin' to authenticate.")
+                logger.error("微信扫码登录失败或被中止。")
                 self._running = False
                 return
 
@@ -464,7 +512,7 @@ class WeixinChannel(BaseChannel):
         if self._client:
             await self._client.aclose()
             self._client = None
-        self._save_state()
+        self._save_cache_state()
 
     # ------------------------------------------------------------------
     # Polling  (matches monitor.ts monitorWeixinProvider)
@@ -527,7 +575,7 @@ class WeixinChannel(BaseChannel):
         new_buf = data.get("get_updates_buf", "")
         if new_buf:
             self._get_updates_buf = new_buf
-            self._save_state()
+            self._save_cache_state()
 
         msgs: list[dict] = data.get("msgs", []) or []
         for msg in msgs:
@@ -560,7 +608,7 @@ class WeixinChannel(BaseChannel):
         ctx_token = msg.get("context_token", "")
         if ctx_token:
             self._context_tokens[from_user_id] = ctx_token
-            self._save_state()
+            self._save_cache_state()
 
         item_list: list[dict] = msg.get("item_list") or []
         content_parts: list[str] = []

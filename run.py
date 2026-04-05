@@ -39,6 +39,8 @@ channel_manager = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global channel_manager
+
     print("="*50)
     print("🚀 正在启动 Autonomous Agent 系统 (Web 模式)...")
     setup_logging()
@@ -52,7 +54,7 @@ async def lifespan(app: FastAPI):
     SolverService(gateway, power=power)
     WorkerService(gateway, power=power)
 
-    # --- 新增：加载并启动全部渠道服务 ---
+    # --- 加载并启动全部渠道服务 ---
     cfg = ChannelRootConfig.load()
     channel_manager = ChannelManager(cfg, gateway)
     await channel_manager.start_all()
@@ -71,6 +73,7 @@ async def lifespan(app: FastAPI):
         webbrowser.open("http://127.0.0.1:8000")
     
     threading.Thread(target=open_browser, daemon=True).start()
+    
     
     gateway.recover_pending_messages()
 
@@ -161,6 +164,12 @@ async def listen_user_queue(c_manager: ChannelManager):
                     # 2. 外部通信端：交给 ChannelManager 进行精准的路由分发
                     if c_manager:
                         await c_manager.dispatch_outbound(last_msg)
+            
+            if ctx:
+                ctx.ack_all_messages()
+                # USER 队列的 Context 实际上归属于 BUTLER 记忆，所以 owner 填 Component.USER 会自动映射保存
+                gateway.store.set(Component.USER, ctx, ctx.owner_id)
+            
             user_queue.task_done()
             
         except queue.Empty:
@@ -319,14 +328,28 @@ def get_channel_config():
     return cfg.model_dump(mode="json")
 
 @app.post("/api/config/channels")
-def save_channel_config(req: dict):
+async def save_channel_config(req: dict):
     try:
-        # 使用传入的字典重构 Pydantic 模型，触发严谨的类型校验
         cfg = ChannelRootConfig(**req)
         cfg.save()
-        return {"success": True, "message": "渠道配置已保存！注意：部分长连接渠道的参数修改可能需要重启后端才能完全生效。"}
+        # 通知管理器热重载
+        if channel_manager:
+            await channel_manager.reload_from_config(cfg)
+        return {"success": True, "message": "渠道配置已保存并实时生效！"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+# 新增二维码获取接口 (加在 save_channel_config 下面即可)
+@app.get("/api/channels/weixin/qr")
+def get_weixin_qr():
+    if not channel_manager:
+        return {"qr_url": ""}
+    wx_channel = channel_manager.get_channel("weixin")
+    if not wx_channel:
+        return {"qr_url": ""}
+    # 获取微信模块中缓存的二维码链接
+    qr = getattr(wx_channel, "current_qr_url", "")
+    return {"qr_url": qr}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

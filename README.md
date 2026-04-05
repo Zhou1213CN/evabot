@@ -107,6 +107,14 @@ python run.py
     <td align="center"><img src="./fig/task.png" height="400"></td>
     <td align="center"><img src="./fig/llm.png" height="400"></td>
   </tr>
+  <tr>
+      <th align="center">Channels Config Page</th>
+      <th align="center"> </th>
+    </tr>
+    <tr>
+      <td align="center"><img src="./fig/channels.png" height="400"></td>
+      <td align="center"><img src=" " height="400"></td>
+    </tr>
 </table>
 
 
@@ -160,10 +168,10 @@ run.py                      # System entry point
 ## 🗺️ Roadmap
 - [x] Core architecture
 - [x] Frontend UI
+- [x] channel support
 - [ ] Scheduled tasks
 - [ ] Daily information recording/processing
 - [ ] Computer operation
-- [ ] Multi-channel messaging support
 - [ ] Multimodal support
 
 

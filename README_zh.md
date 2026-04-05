@@ -108,6 +108,14 @@ python run.py
     <td align="center"><img src="./fig/task.png" height="400"></td>
     <td align="center"><img src="./fig/llm.png" height="400"></td>
   </tr>
+  <tr>
+    <th align="center">渠道配置页</th>
+    <th align="center"> </th>
+  </tr>
+  <tr>
+    <td align="center"><img src="./fig/channels.png" height="400"></td>
+    <td align="center"><img src=" " height="400"></td>
+  </tr>
 </table>
 
 
@@ -161,10 +169,10 @@ run.py                      # 系统启动入口
 ## 🗺️ 路线图
 - [x] 基础架构
 - [x] 前端页面
+- [x] 消息渠道支持
 - [ ] 定时任务
 - [ ] 日常信息记录/处理
 - [ ] 操作电脑
-- [ ] 多消息渠道支持
 - [ ] 多模态支持
 
 

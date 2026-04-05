@@ -63,10 +63,14 @@ class WorkerService():
                     self.gateway.finish_running(Component.WORKER, ctx.owner_id, ctx)
                 except Exception as e:
                     # 捕获业务逻辑的未知异常，防止线程挂掉
+                    target_channel = getattr(ctx.packets[0], "source_channel", None) if ctx.packets else None
+                    target_receiver_id = getattr(ctx.packets[0].data, "target_receiver_id", None) if ctx.packets[0].data else None
                     error_response = Message(
                         sender_id=ctx.owner_id,
                         sender=Component.WORKER,  # 发送者是我
                         send_type=SendType.USER,  
+                        receiver_id=target_receiver_id,
+                        source_channel=target_channel,
                         content=f"系统遇到内部错误，无法处理您的请求。\n错误信息: {str(e)}",
                         status=Status.ERROR       # 标记为 Error 状态
                     )
@@ -88,6 +92,8 @@ class WorkerService():
     def run_worker(self, ctx: Context):
         if not ctx.packets:
             return
+        target_channel = getattr(ctx.packets[0], "source_channel", None) if ctx.packets else None
+        target_receiver_id = getattr(ctx.packets[0].data, "target_receiver_id", None) if ctx.packets[0].data else None
         self.gateway.task_manager.update_node_status(ctx.owner_id, NodeStatus.RUNNING)
         os_name = platform.system()
 
@@ -150,9 +156,11 @@ class WorkerService():
                                 data={
                                     'skill_name': sub_skill_name,
                                     'needs_self_verification': sub_needs_verification,
-                                    "permission_type": ctx.permission_type
+                                    "permission_type": ctx.permission_type,
+                                "target_receiver_id": target_receiver_id
                                 },
-                                tool_call_id=tool_call_id
+                                tool_call_id=tool_call_id,
+                                source_channel=target_channel
                             )
 
                             result = self.gateway.handle(worker_msg)
@@ -260,6 +268,8 @@ class WorkerService():
                             sender_id=ctx.owner_id,
                             sender=Component.WORKER,
                             send_type=SendType.USER,
+                            receiver_id=target_receiver_id,
+                            source_channel=target_channel,
                             content=f'【系统通知：心跳消息】\n{heart_content}',
                             message_type=MessageType.HEARTBEAT
                         )
@@ -275,7 +285,7 @@ class WorkerService():
                     is_finished = True
 
                 if is_finished:
-                    is_passed, has_verified, new_ctx = self.auditor.run_finish_audit(ctx, skill_content, iteration)
+                    is_passed, has_verified, new_ctx = self.auditor.run_finish_audit(ctx, skill_content)
                     
                     if not is_passed:
                         if not new_ctx:
@@ -325,7 +335,7 @@ class WorkerService():
                     return
 
             # 超出循环次数，调用Auditor审计是否继续
-            is_passed, new_ctx = self.auditor.run_timeout_audit(ctx, skill_content, iteration)
+            is_passed, new_ctx = self.auditor.run_timeout_audit(ctx, skill_content)
             if is_passed:
                 ctx = new_ctx
                 iteration = 0

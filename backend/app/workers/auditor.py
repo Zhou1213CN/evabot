@@ -7,7 +7,7 @@ from backend.core.schemas import Context, Message, Component, MessageRole, Messa
 from backend.llm.llm import call_llm
 from backend.core.log import get_logger, log_event
 from backend.llm.llm_config import LLMConfig
-from backend.core.utils import extract_json, load_prompt
+from backend.core.utils import extract_json, gen_id, load_prompt
 
 logger = get_logger("worker.auditor")
 need_tools = ["edit_file"]
@@ -39,15 +39,15 @@ class WorkerAuditor:
             latency = resp.data.get("latency_s", 0.0)
             self.task_manager.record_node_cost(ctx.owner_id, cost, latency)
 
-    def _save_audit_log(self, ctx: Context, action: str, system_prompt: str, user_prompt: str, response: Message, iteration: int, parsed_result: dict = None):
-        """将同一轮审计（iteration）的所有推理过程追加保存到同一个 JSON 文件中"""
+    def _save_audit_log(self, ctx: Context, action: str, system_prompt: str, user_prompt: str, response: Message, audit_id: str, parsed_result: dict = None):
+        """将同一轮审计（audit_id）的所有推理过程追加保存到同一个 JSON 文件中"""
         if not getattr(ctx, "work_dir", None):
             return
             
         log_dir = os.path.join(ctx.work_dir, "audits")
         os.makedirs(log_dir, exist_ok=True)
         
-        file_path = os.path.join(log_dir, f"audit_iter_{iteration}.json")
+        file_path = os.path.join(log_dir, f"{audit_id}.json")
         
         log_entry = {
             "timestamp": time.time(),
@@ -78,7 +78,7 @@ class WorkerAuditor:
         except Exception as e:
             logger.error(f"Failed to save audit log: {e}")
 
-    def _update_attempt(self, ctx: Context, status: NodeStatus, attribution: bool = None, feedback: str = None, add_new: bool = False, iteration: int = 0):
+    def _update_attempt(self, ctx: Context, status: NodeStatus, attribution: bool = None, feedback: str = None, add_new: bool = False, audit_id: str = gen_id('aud_')):
         """同步审计结果到当前 Attempt，并在需要继续时压入一个新的 Attempt"""
         if not self.task_manager: return
         from backend.core.schemas import WorkerAttempt
@@ -87,7 +87,7 @@ class WorkerAuditor:
             node = self.task_manager.get_node(ctx.owner_id)
             if node and node.attempts:
                 last_attempt = node.attempts[-1]
-                last_attempt.iteration = iteration
+                last_attempt.audit_id = audit_id
                 # 同步审计反馈与状态
                 if not last_attempt.model:
                     last_attempt.model = ctx.model_id
@@ -113,13 +113,23 @@ class WorkerAuditor:
             summary += f"- [{p.message_role.value}] {content_preview}...\n"
         return summary
 
-    def calculate_complexity(self, ctx: Context, iteration: int) -> float:
+    def calculate_complexity(self, ctx: Context, audit_id: str) -> float:
         """评估任务实际难度 (1.0 - 5.0)"""
+        config = self.llm_config_loader.load()
+        auditor_ref = config.defaults.get(Component.AUDITOR)
+        max_score = 5.0  # 默认保底分数
+        
+        if auditor_ref:
+            _, model_conf = config.get_model(auditor_ref)
+            if model_conf:
+                max_score = model_conf.capability_score
+
         trace_summary = self.get_context_summary(ctx)
         prompt = trace_summary
 
+
         system_prompt = f"""请评估以下任务的实际执行复杂度 (1.0 到 5.0 分)，数值越高表示任务越复杂。
-        以你的水平做这个任务，勉强能完成是5.0分。任意一个大模型都可以轻松完成，是1.0分。
+        以你的水平做这个任务，刚好能完成是{max_score}分。任何人都可以轻松完成，是0.5分。
         不要受到这个任务执行员的能力所干扰，完全根据任务本身的复杂度来评估。
         直接返回一个 JSON，格式：{{"actual_complexity": 3.0}}"""
         
@@ -128,11 +138,11 @@ class WorkerAuditor:
         self._record_llm_cost(ctx, resp)
         
         res_dict = extract_json(resp.content)
-        self._save_audit_log(ctx, "calculate_complexity", system_prompt, prompt, resp, iteration, res_dict)
+        self._save_audit_log(ctx, "calculate_complexity", system_prompt, prompt, resp, audit_id, res_dict)
         
         ctx.complexity = float(res_dict.get("actual_complexity", 3.0))
 
-    def audit_task(self, ctx: Context, iteration: int, res_dict: dict = None) -> dict:
+    def audit_task(self, ctx: Context, audit_id: str, res_dict: dict = None) -> dict:
         if res_dict is None:
             res_dict = {}
 
@@ -143,8 +153,13 @@ class WorkerAuditor:
         trace_summary = self.get_context_summary(ctx)
         needs_verification = ctx.packets[0].data.get("needs_verification", False) if ctx.packets[0].data else False
 
-        prompt = f"【最终汇报】：\n{finally_report}"
-        system_prompt = """你是一个严苛的审计员。判断执行员的【最终汇报】是否承认失败。承认失败 is_passed 是 false，否则为 true。请严格返回 JSON 格式： {"is_passed": true/false}"""
+        prompt = f"【初始任务】：\n{ctx.packets[0].content}\n【最终汇报】：\n{finally_report}"
+        system_prompt = """你是一个严苛的审计员。判断执行员的【最终汇报】是否真正交付了实质性结果，满足初始任务要求。
+                        规则：
+                        1. 如果汇报中包含具体的答案、数据、文件反馈或实质性的总结，is_passed 为 true。
+                        2. 如果汇报仅仅是“找到了可以查询的网站/方法”、“提供了操作建议”、“无法获取具体数据”，或者直接承认失败，is_passed 必须为 false。
+                        3. 如果汇报是一个文件，但初始任务需要的是一个具体的结论或者数据，那么应该返回具体内容而不是文件，is_passed 也应该是 false。
+                        请严格返回 JSON 格式： {"is_passed": true/false,"reason":"xxx"}"""
         
         if not res_dict:
             eval_ctx = self._create_eval_context(ctx, prompt)
@@ -152,58 +167,58 @@ class WorkerAuditor:
             self._record_llm_cost(ctx, resp)
             
             audit_result = extract_json(resp.content)
-            self._save_audit_log(ctx, "audit_task_step1", system_prompt, prompt, resp, iteration, audit_result)
+            self._save_audit_log(ctx, "audit_task_step1", system_prompt, prompt, resp, audit_id, audit_result)
             
             if "is_passed" not in audit_result:
-                return self.audit_task(ctx, iteration) 
+                return self.audit_task(ctx, audit_id) 
                 
             # 修复：必须赋予游标才能确保结果顺延到下一个判断
             res_dict = audit_result 
         
         # 精简逻辑：如果直接承认失败了，没有必要做后面的幻觉检测
         if not res_dict.get("is_passed"):
-            return {"is_passed": False, "have_verified": True}
+            return {"is_passed": False, "have_verified": True,"reason": res_dict.get("reason", "")}
         
         prompt = trace_summary
         system_prompt = """你是一个严苛的审计员。请基于【执行轨迹概要】，判断执行员的【最终汇报】是否来源可靠。
         审计规则（幻觉检测）：每一步的信息，必须在执行轨迹中有正确的操作获得。如果信息没有经过正确的工具执行获得，或者工具返回错误或为空，执行员却宣称完成，属于幻觉，is_passed 必须为 false。
         注意：这里我们不判定这些步骤是否必要（即使有些步骤看起来多余或者不合理，只要它们的结果是通过正确的工具调用获得的，就不算幻觉），我们只判定最终汇报的信息是否可靠。
-        请严格返回 JSON 格式： {"is_passed": true/false}"""
+        请严格返回 JSON 格式： {"is_passed": true/false,"reason":"xxx"}"""
         
-        if not res_dict:
-            eval_ctx = self._create_eval_context(ctx, prompt)
-            resp = call_llm(eval_ctx, system_prompt=system_prompt, json_mode=True)
-            self._record_llm_cost(ctx, resp)
-            
-            audit_result = extract_json(resp.content)
-            self._save_audit_log(ctx, "audit_task_step2", system_prompt, prompt, resp, iteration, audit_result)
-            
-            if "is_passed" not in audit_result:
-                return self.audit_task(ctx, iteration) 
+        eval_ctx = self._create_eval_context(ctx, prompt)
+        resp = call_llm(eval_ctx, system_prompt=system_prompt, json_mode=True)
+        self._record_llm_cost(ctx, resp)
         
-        res_dict = {'is_passed': audit_result.get("is_passed"), 'have_verified': True}
+        audit_result = extract_json(resp.content)
+        self._save_audit_log(ctx, "audit_task_step2", system_prompt, prompt, resp, audit_id, audit_result)
+        
+        if "is_passed" not in audit_result:
+            return self.audit_task(ctx, audit_id) 
+        
+        res_dict = {'is_passed': audit_result.get("is_passed"), 'have_verified': True,"reason":""}
         if needs_verification and audit_result.get("is_passed"):
             prompt = trace_summary
             system_prompt = """你是一个严苛的审计员。请基于【执行轨迹概要】，判断执行员的【最终汇报】是否经过自我验证。
             如果对任务要求的交付物，执行测试/验证，基于正确的工具调用获得了反馈，并且根据反馈才认定的通过，那么就算经过了自我验证，is_passed 才是 true。
-            请严格返回 JSON 格式： {"have_verified": true/false}"""
+            请严格返回 JSON 格式： {"have_verified": true/false,"reason":"xxx"}"""
             
             eval_ctx = self._create_eval_context(ctx, prompt)
             resp = call_llm(eval_ctx, system_prompt=system_prompt, json_mode=True)
             self._record_llm_cost(ctx, resp)
             
             verify_result = extract_json(resp.content)
-            self._save_audit_log(ctx, "audit_task_verify", system_prompt, prompt, resp, iteration, verify_result)
+            self._save_audit_log(ctx, "audit_task_verify", system_prompt, prompt, resp, audit_id, verify_result)
             
             if "have_verified" not in verify_result:
-                return self.audit_task(ctx, iteration, res_dict) 
+                return self.audit_task(ctx, audit_id, res_dict) 
             else:
                 res_dict["have_verified"] = verify_result.get("have_verified")
+                res_dict["reason"] = verify_result.get("reason", "")
             
         log_event(logger, "AUDIT_RESULT", node_id=ctx.owner_id, result=res_dict)
         return res_dict
  
-    def update_worker(self, ctx: Context, failure_reason: str, iteration: int):
+    def update_worker(self, ctx: Context, failure_reason: str, audit_id: str):
         
         system_prompt = """根据失败原因，总结通用性经验，调用edit_file工具，把经验更新到 worker.py 中。如果是任务特殊性，并不能给未来的其他工作提供指导意义的经验，就不需要更新文件了。"""
         worker_prompt = load_prompt(os.path.dirname(__file__),'worker.md',True)
@@ -212,7 +227,7 @@ class WorkerAuditor:
         eval_ctx = self._create_eval_context(ctx, user_prompt)
         resp = call_llm(eval_ctx, system_prompt=system_prompt, tools=get_base_tool(need_tools))
         self._record_llm_cost(ctx, resp)
-        self._save_audit_log(ctx, "update_worker", system_prompt, user_prompt, resp, iteration)
+        self._save_audit_log(ctx, "update_worker", system_prompt, user_prompt, resp, audit_id)
         
         if resp.data and resp.data.get("tool_calls"):
             tc = resp.data["tool_calls"][0]
@@ -222,12 +237,11 @@ class WorkerAuditor:
             result = execute_tool('edit_file', args_dict)
             log_event(logger, "WORKER_MD_UPDATE", node_id=ctx.owner_id, args=args_dict, result=result)
 
-    def analyze_failure(self, ctx: Context, skill_desc: str, iteration: int) -> dict:
+    def analyze_failure(self, ctx: Context, skill_desc: str, audit_id: str, failure_reason: str = "") -> dict:
         """失败归因诊断：判断是模型智商不够还是 Skill 能力缺失"""
-        original_intent = ctx.packets[0].content
-        trace_summary = "\n".join([f"[{p.message_role.value}]: {p.content[:200]}..." for p in ctx.packets[1:]])
+        trace_summary = self.get_context_summary(ctx)
 
-        prompt = f'【初始任务】：{original_intent}\n【执行轨迹概要】：\n{trace_summary}\n【当前使用的 Skill 描述】：\n{skill_desc}'
+        prompt = f'【为什么判定失败】：{failure_reason}\n【执行轨迹概要】：\n{trace_summary}\n【当前使用的 Skill 描述】：\n{skill_desc}'
 
         system_prompt = """你作为失败任务的复盘专家，请分析导致任务失败的具体原因。
         归因原则：
@@ -246,18 +260,18 @@ class WorkerAuditor:
         self._record_llm_cost(ctx, resp)
 
         res_dict = extract_json(resp.content)
-        self._save_audit_log(ctx, "analyze_failure", system_prompt, prompt, resp, iteration, res_dict)
+        self._save_audit_log(ctx, "analyze_failure", system_prompt, prompt, resp, audit_id, res_dict)
         
         if "attribution" not in res_dict:
-            return self.analyze_failure(ctx, skill_desc, iteration) 
+            return self.analyze_failure(ctx, skill_desc, audit_id) 
         
         if res_dict.get("attribution") == "model" and res_dict.get("failure_reason"):
-            self.update_worker(ctx, res_dict.get("failure_reason"), iteration)
+            self.update_worker(ctx, res_dict.get("failure_reason"), audit_id)
 
         log_event(logger, "AUDIT_FAILURE_ANALYSIS", node_id=ctx.owner_id, result=res_dict)
         return res_dict
 
-    def need_continue(self, ctx: Context, skill_desc: str, iteration: int) -> dict:
+    def need_continue(self, ctx: Context, skill_desc: str, audit_id: str) -> dict:
         """判断是否继续进行，skill不行就算了，模型不行就换模型继续"""
         original_intent = ctx.packets[0].content
         trace_summary = "\n".join([f"[{p.message_role.value}]: {p.content[:200]}..." for p in ctx.packets[1:]])
@@ -281,15 +295,15 @@ class WorkerAuditor:
         self._record_llm_cost(ctx, resp)
 
         res_dict = extract_json(resp.content)
-        self._save_audit_log(ctx, "need_continue", system_prompt, prompt, resp, iteration, res_dict)
+        self._save_audit_log(ctx, "need_continue", system_prompt, prompt, resp, audit_id, res_dict)
         
         if "attribution" not in res_dict:
-            return self.need_continue(ctx, skill_desc, iteration) 
+            return self.need_continue(ctx, skill_desc, audit_id) 
 
         log_event(logger, "AUDIT_FAILURE_ANALYSIS", node_id=ctx.owner_id, attribution=res_dict.get("attribution", 'unknown'))
         return res_dict
     
-    def update_model(self, ctx: Context, is_passed: bool, failure_reason: str, iteration: int) -> float:
+    def update_model(self, ctx: Context, is_passed: bool, failure_reason: str, audit_id: str) -> float:
         actual_complexity = ctx.complexity
         config = self.llm_config_loader.load()
         current_model_ref = ctx.model_id
@@ -317,7 +331,7 @@ class WorkerAuditor:
             eval_ctx = self._create_eval_context(ctx, update_prompt)
             desc_resp = call_llm(eval_ctx, system_prompt=system_prompt, json_mode=False)
             self._record_llm_cost(ctx, desc_resp)
-            self._save_audit_log(ctx, "update_model_desc", system_prompt, update_prompt, desc_resp, iteration)
+            self._save_audit_log(ctx, "update_model_desc", system_prompt, update_prompt, desc_resp, audit_id)
             
             current_model.description = desc_resp.content.strip()
 
@@ -346,7 +360,6 @@ class WorkerAuditor:
                         
         ctx.model_id = best_model_ref
 
-
     def _estimate_context_tokens(self, ctx: Context) -> int:
         """
         基于 UTF-8 字节长度的混合语言 Token 估算法。
@@ -363,7 +376,7 @@ class WorkerAuditor:
                 
         return total_bytes // 3
     
-    def compress_context(self, ctx: Context, iteration: int, failure_reason: str = ""):
+    def compress_context(self, ctx: Context, audit_id: str, failure_reason: str = ""):
         """压缩上下文"""
         import copy
         import shutil
@@ -475,7 +488,7 @@ class WorkerAuditor:
             self._record_llm_cost(ctx, resp)
             
             compressed_summary = resp.content.strip()
-            self._save_audit_log(ctx, "compress_context", system_prompt, actions_str, resp, iteration, {"compressed_summary": compressed_summary})
+            self._save_audit_log(ctx, "compress_context", system_prompt, actions_str, resp, audit_id, {"compressed_summary": compressed_summary})
 
         new_packets = [ctx.packets[0]] 
 
@@ -526,53 +539,55 @@ class WorkerAuditor:
 
         ctx.packets = new_packets
 
-    def run_finish_audit(self, ctx: Context, skill_content: str, iteration: int) -> Tuple[bool, bool, Context]:
+    def run_finish_audit(self, ctx: Context, skill_content: str) -> Tuple[bool, bool, Context]:
+        audit_id = gen_id('aud_')
         """场景一：长期迭代任务结束时调用"""
-        audit_res = self.audit_task(ctx, iteration)
-        self.calculate_complexity(ctx, iteration)
+        audit_res = self.audit_task(ctx, audit_id)
+        self.calculate_complexity(ctx, audit_id)
         
         if audit_res.get("is_passed") and audit_res.get("have_verified"):
-            self.update_model(ctx, True, "", iteration)
-            self._update_attempt(ctx, NodeStatus.COMPLETED, feedback="任务通过且完成自我验证", iteration=iteration)
+            self.update_model(ctx, True, "", audit_id)
+            self._update_attempt(ctx, NodeStatus.COMPLETED, feedback="任务通过且完成自我验证", audit_id=audit_id)
             return True, True, ctx
         elif audit_res.get("is_passed") and not audit_res.get("have_verified"):
             if self._estimate_context_tokens(ctx) > 10000:    
-                self.compress_context(ctx, iteration)
-            self._update_attempt(ctx, NodeStatus.RUNNING, feedback="任务未自我验证", add_new=True, iteration=iteration)
+                self.compress_context(ctx, audit_id)
+            self._update_attempt(ctx, NodeStatus.RUNNING, feedback="任务未自我验证", add_new=True, audit_id=audit_id)
             return True, False, ctx
         
-        failure = self.analyze_failure(ctx, skill_content, iteration)
+        failure = self.analyze_failure(ctx, skill_content, audit_id, audit_res.get("reason", ""))
         failure_reason = failure.get("failure_reason", "未知原因")
         attribution = audit_res.get("attribution", "model")
         
         if attribution == "skill":
-            self._update_attempt(ctx, NodeStatus.FAILED, attribution=False, feedback=failure_reason, iteration=iteration)
+            self._update_attempt(ctx, NodeStatus.FAILED, attribution=False, feedback=failure_reason, audit_id=audit_id)
             return False, False, None
         else:
-            self.update_model(ctx, False, failure_reason, iteration)
+            self.update_model(ctx, False, failure_reason, audit_id)
             self.decide_next_model(ctx)
 
         if self._estimate_context_tokens(ctx) > 8000:
-            self.compress_context(ctx, iteration, failure_reason)
+            self.compress_context(ctx, audit_id, failure_reason)
 
-        self._update_attempt(ctx, NodeStatus.RUNNING, attribution=True, feedback=failure_reason, add_new=True, iteration=iteration)
+        self._update_attempt(ctx, NodeStatus.RUNNING, attribution=True, feedback=failure_reason, add_new=True, audit_id=audit_id)
         return False, False, ctx
 
-    def run_timeout_audit(self, ctx: Context, skill_content: str, iteration: int) -> Tuple[bool, Context]:
+    def run_timeout_audit(self, ctx: Context, skill_content: str) -> Tuple[bool, Context]:
         """场景二：超出循环次数时调用"""
-        failure = self.need_continue(ctx, skill_content, iteration)
+        audit_id = gen_id('aud_')
+        failure = self.need_continue(ctx, skill_content, audit_id)
         attribution = failure.get("attribution", True)        
-        self.calculate_complexity(ctx, iteration)
+        self.calculate_complexity(ctx, audit_id)
         reason = failure.get("reason", "执行超时，可能由于逻辑循环或死胡同")
         if attribution == "skill":
-            self._update_attempt(ctx, NodeStatus.FAILED, attribution=False, feedback=reason, iteration=iteration)
+            self._update_attempt(ctx, NodeStatus.FAILED, attribution=False, feedback=reason, audit_id=audit_id)
             return False, ctx
         else:
             self.decide_next_model(ctx)
             if attribution == "task":
-                self._update_attempt(ctx, NodeStatus.RUNNING, attribution=True, feedback="任务过于复杂,需要继续迭代", add_new=True, iteration=iteration)
+                self._update_attempt(ctx, NodeStatus.RUNNING, attribution=True, feedback="任务过于复杂,需要继续迭代", add_new=True, audit_id=audit_id)
                 return True, ctx
             elif self._estimate_context_tokens(ctx) > 10000:
-                self.compress_context(ctx, iteration)
-        self._update_attempt(ctx, NodeStatus.RUNNING, attribution=True, feedback=reason, add_new=True, iteration=iteration)
+                self.compress_context(ctx, audit_id)
+        self._update_attempt(ctx, NodeStatus.RUNNING, attribution=True, feedback=reason, add_new=True, audit_id=audit_id)
         return True, ctx

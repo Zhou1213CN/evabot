@@ -64,10 +64,16 @@ class ButlerService:
                     self.gateway.finish_running(Component.BUTLER, ctx.owner_id, ctx)
                 except Exception as e:
                     # 捕获业务逻辑的未知异常，防止线程挂掉
+                    trigger_msg = ctx.packets[-1] if ctx.packets else None
+                    # 提取用户的实际 ID (入站时的 sender_id) 和渠道来源
+                    target_receiver_id = getattr(trigger_msg, "sender_id", ctx.owner_id) if trigger_msg else ctx.owner_id
+                    target_channel = getattr(trigger_msg, "source_channel", None) if trigger_msg else None
                     error_response = Message(
                         sender=Component.BUTLER,
                         sender_id=ctx.owner_id,
-                        send_type=SendType.USER,                 # 直接发给用户
+                        send_type=SendType.USER, 
+                        receiver_id=target_receiver_id,
+                        source_channel=target_channel,                # 直接发给用户
                         content=f"系统遇到内部错误，无法处理您的请求。\n错误信息: {str(e)}",
                         status=Status.ERROR                      # 标记为 Error 状态
                         )
@@ -187,7 +193,8 @@ class ButlerService:
                             send_type=SendType.DOWNWARD,              # 新建下发任务
                             content=trigger_data.intent,
                             tool_call_id=tool_call_id,
-                            data={"permission_type": trigger_data.auth_level}
+                            data={"permission_type": trigger_data.auth_level, "target_receiver_id": target_receiver_id},
+                            source_channel=target_channel
                         )
                         result = self.gateway.handle(solver_msg)
                         if result.status == 'OK':

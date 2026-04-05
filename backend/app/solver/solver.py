@@ -64,9 +64,13 @@ class SolverService():
                     self.gateway.finish_running(Component.SOLVER, ctx.owner_id, ctx)
                 except Exception as e:
                     # 捕获业务逻辑的未知异常，防止线程挂掉
+                    target_channel = getattr(ctx.packets[0], "source_channel", None) if ctx.packets else None
+                    target_receiver_id = getattr(ctx.packets[0].data, "target_receiver_id", None) if ctx.packets[0].data else None
                     error_response = Message(
                         sender=Component.SOLVER,  # 发送者是我
                         sender_id=ctx.owner_id,
+                        receiver_id=target_receiver_id,
+                        source_channel=target_channel,
                         send_type=SendType.USER,  # 直接发给用户
                         content=f"系统遇到内部错误，无法处理您的请求。\n错误信息: {str(e)}",
                         status=Status.ERROR       # 标记为 Error 状态
@@ -102,16 +106,21 @@ class SolverService():
     def run_loop(self, ctx: Context):
         if not ctx.packets:
             return
+        target_channel = getattr(ctx.packets[0], "source_channel", None) if ctx.packets else None
+        target_receiver_id = getattr(ctx.packets[0].data, "target_receiver_id", None) if ctx.packets[0].data else None
         if len(ctx.packets) == 1:
             heart_msg = Message(
                     sender_id=ctx.owner_id,
                     sender=Component.SOLVER,
                     send_type=SendType.USER,
+                    receiver_id=target_receiver_id,
+                    source_channel=target_channel,
                     content=f'【系统通知：任务已开始】\n已收到来自 {ctx.packets[0].sender} 的任务：{ctx.packets[0].content}',
                     message_type=MessageType.HEARTBEAT
                 )
             self.gateway.handle(heart_msg)
         self.gateway.task_manager.update_node_status(ctx.owner_id, NodeStatus.RUNNING)
+        
 
         iteration = 0
         max_iterations = 20  # 防止陷入死循环
@@ -195,9 +204,11 @@ class SolverService():
                             data={
                                 'skill_name': skill_name,
                                 'needs_self_verification': needs_verification,
-                                "permission_type": ctx.permission_type
+                                "permission_type": ctx.permission_type,
+                                "target_receiver_id": target_receiver_id
                             },
                             tool_call_id=tool_call_id,
+                            source_channel=target_channel
                         )
 
                         result = self.gateway.handle(worker_msg)
@@ -245,6 +256,8 @@ class SolverService():
                         sender_id=ctx.owner_id,
                         sender=Component.SOLVER,
                         send_type=SendType.USER,
+                        receiver_id=target_receiver_id,
+                        source_channel=target_channel,
                         content=f'【系统通知：心跳消息】\n{heart_content}',
                         message_type=MessageType.HEARTBEAT
                     )
@@ -256,6 +269,8 @@ class SolverService():
                         sender_id=ctx.owner_id,
                         sender=Component.SOLVER,
                         send_type=SendType.USER,
+                        receiver_id=target_receiver_id,
+                        source_channel=target_channel,
                         content=f'【系统通知：任务已结束】\n{resp.content.strip()}\n{format_artifacts(have_artiface)}',
                         message_type=MessageType.REPORT,
                         artifacts=have_artiface,
@@ -274,6 +289,8 @@ class SolverService():
                     sender_id=ctx.owner_id,
                     sender=Component.SOLVER,
                     send_type=SendType.USER,
+                    receiver_id=target_receiver_id,
+                    source_channel=target_channel,
                     content=f'【系统通知：任务已结束】\n{resp.content.strip()}',
                     message_type=MessageType.REPORT,
                     tool_call_id=ctx.packets[0].tool_call_id
