@@ -12,7 +12,7 @@ from backend.core.base_tools import get_base_tool, execute_tool
 from backend.core.schemas import ArtifactRef, Context, Message, Component, MessageRole, MessageType, NodeStatus, SendType, Status
 from backend.llm.llm import call_llm
 from backend.core.log import get_logger, log_event
-from backend.core.utils import extract_json, format_artifacts, load_prompt
+from backend.core.utils import extract_json, format_artifacts, load_prompt, utc_now
 from backend.power.power import PowerManager
 from backend.app.gateway.gateway import Gateway
 
@@ -102,7 +102,7 @@ class WorkerService():
             skill_content = self.power.get_skill_context(skill_name)
             skill_dir = self.power.get_skill_dir(skill_name)
 
-            system_content = f'{self.worker_prompt}\n\n当前操作系统为：{os_name} \n 当前**skill路径**为：{skill_dir} \n 你的**工作区路径**是：{ctx.work_dir} \n\n{skill_content}\n\nAvailable Sub_Skills: \n{self.power.get_sub_skill_xml(skill_name)}'
+            system_content = f'{self.worker_prompt}\n\n{skill_content}\n\nAvailable Sub_Skills: \n{self.power.get_sub_skill_xml(skill_name)}\n\n当前操作系统为：{os_name} \n 当前**skill路径**为：{skill_dir} \n 你的**工作区路径**是：{ctx.work_dir} \n当前系统时间为：{utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")}'
             should_wait = False
             iteration = 0
             while iteration < 20:

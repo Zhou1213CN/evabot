@@ -204,7 +204,8 @@ class ChannelRootConfig(BaseModel):
             # 剥离出已强类型声明的字段，剩下的统统塞进 others
             known_keys = {
                 "feishu", "telegram", "qq", "dingtalk", 
-                "mochat", "discord", "slack", "whatsapp", "email", "weixin"
+                "mochat", "discord", "slack", "whatsapp", "email", "weixin",
+                "notification_channels"
             }
             filtered_data = {}
             others_data = {}

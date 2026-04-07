@@ -15,6 +15,7 @@ createApp({
         const hasMoreMessages = ref(false);
         const isLoadingHistory = ref(false);
         
+        
         // 任务树
         const historyTasks = ref([]);
         const activeSolveId = ref(null);
@@ -43,6 +44,26 @@ createApp({
             cost: { input_1m: 0, output_1m: 0 }
         });
         const modelForm = ref(defaultModelForm());
+
+
+        // --- 任务树面板显隐与强制刷新 ---
+        const showTaskPanel = ref(true);
+
+        const refreshChat = async () => {
+            messages.value = []; // 清空当前消息
+            messageOffset.value = 0; // 重置分页光标
+            hasMoreMessages.value = false;
+            await loadHistory(); // 重新拉取 butler.json 历史
+            scrollToBottom();
+        };
+
+        // 监听面板显隐状态，当发生切换时，延迟触发 ECharts 图表尺寸重置
+        watch(showTaskPanel, (newVal) => {
+            if (myChart) {
+                // 等待 300ms 的 CSS 动画完成后重绘
+                setTimeout(() => myChart.resize(), 310);
+            }
+        });
 
 
         // 渠道配置数据
@@ -425,7 +446,8 @@ createApp({
             showProvModal, isEditProv, provForm, openProviderModal, saveProvider, deleteProvider,
             showModelModal, isEditModel, currentProvForModel, modelForm, openModelModal, saveModel, deleteModel,
             messageOffset, hasMoreMessages, isLoadingHistory, loadHistory, getArtifactUrl,
-            channelConfig, notificationChannelsStr, isKnownChannel, fetchChannelConfig, saveChannelConfig, weixinQrUrl
+            channelConfig, notificationChannelsStr, isKnownChannel, fetchChannelConfig, saveChannelConfig, weixinQrUrl,
+            showTaskPanel, refreshChat
         };
     }
 }).mount('#app');

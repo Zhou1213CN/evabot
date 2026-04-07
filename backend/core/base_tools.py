@@ -399,6 +399,62 @@ class GetAllSkillsTool(BaseTool):
             return "\n".join(tree_lines)
         except Exception as e:
             return f"获取 skills 失败: {str(e)}"
+        
+
+class AddScheduleTool(BaseTool):
+    name = "add_schedule"
+    description = "Create a scheduled task. Supports sending direct messages to user or starting a new task at a specific date or on a cron schedule."
+    parameters = {
+        "type": "object",
+        "properties": {
+            "trigger_type": {"type": "string", "enum": ["date", "cron"], "description": "Type of schedule trigger."},
+            "trigger_args": {
+                "type": "object", 
+                "description": "Arguments for the trigger. For 'date', provide 'run_date' (e.g., '2026-04-07 15:30:00'). For 'cron', provide 'cron_expression' (standard 5-part cron string, e.g., '0 8 * * *')."
+            },
+            "action_type": {"type": "string", "enum": ["send_message", "create_task"], "description": "Type of action to execute."},
+            "content": {"type": "string", "description": "The exact message to send to the user, or the exact task description to be executed by the solver."}
+        },
+        "required": ["trigger_type", "trigger_args", "action_type", "content"]
+    }
+
+    def execute(self, trigger_type: str, trigger_args: dict, action_type: str, content: str, **kwargs: Any) -> str:
+        import json
+        import os
+        from datetime import datetime
+        from backend.core.utils import gen_id
+        
+        try:
+            base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../workspace/schedules'))
+            os.makedirs(base_dir, exist_ok=True)
+            pending_file = os.path.join(base_dir, 'pending_tasks.json')
+            
+            tasks = []
+            if os.path.exists(pending_file):
+                with open(pending_file, 'r', encoding='utf-8') as f:
+                    try:
+                        tasks = json.load(f)
+                    except json.JSONDecodeError:
+                        tasks = []
+                    
+            task_id = gen_id("sch_")
+            new_task = {
+                "task_id": task_id,
+                "created_at": datetime.now().isoformat(),
+                "trigger_type": trigger_type,
+                "trigger_args": trigger_args,
+                "action_type": action_type,
+                "content": content
+            }
+            
+            tasks.append(new_task)
+            
+            with open(pending_file, 'w', encoding='utf-8') as f:
+                json.dump(tasks, f, ensure_ascii=False, indent=2)
+                
+            return f"Scheduled task created successfully. Task ID: {task_id}. Trigger: {trigger_type} with parameters {trigger_args}. Action: {action_type}."
+        except Exception as e:
+            return f"Failed to create schedule: {str(e)}"
 
 # 注册所有支持的工具
 REGISTERED_TOOLS = [
@@ -407,7 +463,8 @@ REGISTERED_TOOLS = [
     ReadFileTool(),
     WriteFileTool(),
     EditFileTool(),
-    GetAllSkillsTool()
+    GetAllSkillsTool(),
+    AddScheduleTool()
 ]
 
 

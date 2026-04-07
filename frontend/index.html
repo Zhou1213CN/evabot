@@ -40,7 +40,20 @@
             </header>
 
             <div v-show="currentTab === 'chat'" class="flex-1 flex overflow-hidden">
-                <div class="w-1/3 flex flex-col border-r border-gray-200 bg-white">
+                <div :class="showTaskPanel ? 'w-1/3' : 'w-full'" class="flex flex-col border-r border-gray-200 bg-white transition-all duration-300 relative">
+                    
+                    <div class="px-4 py-2 border-b border-gray-100 flex justify-between items-center bg-gray-50 z-10">
+                        <span class="text-sm font-bold text-gray-700">💬 聊天会话</span>
+                        <div class="flex space-x-4">
+                            <button @click="refreshChat" class="text-xs font-bold text-blue-600 hover:text-blue-800 transition" title="强制同步 butler.json 最新消息">
+                                🔄 刷新同步
+                            </button>
+                            <button @click="showTaskPanel = !showTaskPanel" class="text-xs text-gray-600 hover:text-gray-800 transition">
+                                {{ showTaskPanel ? '隐藏任务树 ❯' : '❮ 展开任务树' }}
+                            </button>
+                        </div>
+                    </div>
+
                     <div class="flex-1 p-4 overflow-y-auto space-y-4 no-scrollbar" id="chat-box">
                         <div v-if="hasMoreMessages" class="text-center mb-2">
                             <button @click="loadHistory" class="text-xs text-blue-500 hover:text-blue-700 bg-blue-50 px-3 py-1 rounded-full transition">
@@ -48,6 +61,7 @@
                             </button>
                         </div>
                         <div v-for="(msg, index) in messages" :key="index" :class="msg.sender === 'user' ? 'text-right' : 'text-left'">
+                            
                             <div :class="msg.sender === 'user' ? 'bg-blue-500 text-white' : 'bg-gray-100 text-gray-800'" class="inline-block max-w-[85%] px-4 py-2 rounded-lg shadow-sm text-sm whitespace-pre-wrap text-left">
                                 <div v-if="msg.sender !== 'user'" class="font-bold text-xs mb-1 text-gray-500 uppercase">{{ msg.sender }} <span v-if="msg.message_type === 'heartbeat'">💓</span></div>
                                 {{ msg.content }}
@@ -79,7 +93,7 @@
                     </div>
                 </div>
 
-                <div class="w-2/3 flex flex-col bg-gray-50">
+                <div v-show="showTaskPanel" class="w-2/3 flex flex-col bg-gray-50 transition-all duration-300">
                     <div class="h-2/3 p-4">
                         <div class="bg-white h-full rounded-xl shadow-sm border border-gray-200 flex flex-col">
                             <div class="px-4 py-2 border-b border-gray-100 font-semibold text-gray-700 flex justify-between items-center">

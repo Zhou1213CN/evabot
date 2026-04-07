@@ -47,13 +47,13 @@ class TaskManager:
                 except Exception as e:
                     log_event(logger, "TASK_LOAD_ERROR", solve_id=solve_id, error=str(e))
 
-    def create_task(self, channel_id: str, goal: str, tool_call_id: Optional[str] = None, model: Optional[str] = None) -> Task:
+    def create_task(self,  goal: str, tool_call_id: Optional[str] = None, model: Optional[str] = None) -> Task:
         solve_id = gen_id("sol_")
         root_node_id = solve_id # 根节点 ID 默认与 solve_id 相同，方便追溯
         
         with self._lock:
             # 1. 创建 Task 容器
-            task = Task(solve_id=solve_id, channel_id=channel_id, root_node_id=root_node_id)
+            task = Task(solve_id=solve_id, root_node_id=root_node_id)
             self.tasks[solve_id] = task
             
             # 2. 创建 根节点 (Solver 对应的首个节点)

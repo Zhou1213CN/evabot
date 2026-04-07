@@ -11,7 +11,7 @@ from typing import List
 from backend.core.schemas import Context, Message, Component, MessageRole, MessageType, NodeStatus, SendType, Status
 from backend.llm.llm import call_llm
 from backend.core.log import get_logger, log_event
-from backend.core.utils import extract_json, format_artifacts, load_prompt
+from backend.core.utils import extract_json, format_artifacts, load_prompt, utc_now
 from backend.power.power import PowerManager
 from backend.app.gateway.gateway import Gateway
 from backend.core.base_tools import execute_tool, get_base_tool
@@ -94,7 +94,7 @@ class SolverService():
         agent_prompt = self.agent_prompt.replace("{{skills}}", str(skill_xml_list))\
                                         .replace("{{intent}}", ctx.packets[0].content)
         os_name = platform.system()
-        system_content = f'当前操作系统为：{os_name} \n 你的**工作区路径**是：{ctx.work_dir} \n\n{agent_prompt}'
+        system_content = f'{agent_prompt}\n\n当前操作系统为：{os_name} \n 你的**工作区路径**是：{ctx.work_dir} \n当前系统时间为：{utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")}'
         resp = call_llm(ctx, system_prompt=system_content, tools=get_base_tool() )
         if resp.data:
             cost = resp.data.get("cost", 0.0)
@@ -145,6 +145,7 @@ class SolverService():
                             sender=Component.SOLVER,
                             sender_id=ctx.owner_id,
                             send_type=SendType.UPWARD,
+                            receiver_id=ctx.packets[0].sender_id,
                             content=f'我的tool_call_id是{ctx.packets[0].tool_call_id}。以下是我需要的信息: \n{args_dict.get("send_info")}'
                         )
                         self.gateway.handle(info_msg)

@@ -9,7 +9,7 @@ import asyncio
 from typing import Any, Dict, List
 
 from backend.core.log import get_logger
-from backend.core.schemas import Message, MessageType
+from backend.core.schemas import Component, Message, MessageType
 from backend.app.gateway.gateway import Gateway
 from backend.app.channels.base import BaseChannel
 
@@ -102,8 +102,8 @@ class ChannelManager:
 
     async def dispatch_outbound(self, msg: Message) -> None:
         """核心路由：出站消息分发"""
-        # 判断是否为系统生成的通知汇报类消息
-        is_notification = 0#msg.message_type in (MessageType.REPORT, MessageType.HEARTBEAT)
+        # 判断是否为系统生成的消息
+        is_notification = msg.sender == Component.SYSTEM
 
         if is_notification:
             # 广播通知：读取你在 channel_config.yaml 设定的通知目标，比如 ['web', 'telegram']

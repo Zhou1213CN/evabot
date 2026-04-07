@@ -115,7 +115,7 @@ def call_llm(
 
     # A) 插入 System Prompt
     if system_prompt:
-        llm_context.append({"role": "system", "content": system_prompt})
+        llm_context.append({"role": "system", "content": system_prompt})  
 
     # B) 遍历 Context 构建历史
     for packet in ctx.packets:
@@ -143,19 +143,22 @@ def call_llm(
             
         # 处理普通消息 (User 或普通 Assistant)
         else:
+            time_prefix = ""
+            if getattr(packet, 'created_at', None) and ctx.owner == Component.BUTLER:
+                time_prefix = f"[{packet.created_at.strftime('%m-%d %H:%M')}] "
+
             msg_dict = {
                 "role": role.value, 
-                "content": content
+                "content": time_prefix + content
             }
             if role == MessageRole.ASSISTANT and packet.data and packet.data.get("reasoning_content") is not None:
                 msg_dict["reasoning_content"] = packet.data.get("reasoning_content")
 
             if role == MessageRole.USER and llm_context and llm_context[-1]["role"] == "user":
-                llm_context[-1]["content"] += f"\n\n{content}"
+                llm_context[-1]["content"] += f"\n\n{time_prefix}{content}"
             else:
                 llm_context.append(msg_dict)
                 
-            # llm_context.append(msg_dict)
 
     # -------------------------------------------
     # 3. 触发底层网络调用

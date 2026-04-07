@@ -15,6 +15,8 @@ from pydantic import BaseModel
 import uvicorn
 from fastapi.staticfiles import StaticFiles
 
+from backend.core.schedule_manager import ScheduleManager
+
 # 将当前根目录加入系统路径，确保能够正确 import backend 包
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -61,6 +63,8 @@ async def lifespan(app: FastAPI):
 
     # 启动异步后台任务消费 user_queue
     task = asyncio.create_task(listen_user_queue(channel_manager))
+
+    schedule_manager = ScheduleManager(gateway)
     
     print("✅ 系统启动完成！")
     print("🌐 正在唤起浏览器，或手动访问: http://127.0.0.1:8000")
@@ -80,6 +84,7 @@ async def lifespan(app: FastAPI):
     yield
     # 退出时清理
     task.cancel()
+    schedule_manager.stop()
     if channel_manager:
         await channel_manager.stop_all()
 

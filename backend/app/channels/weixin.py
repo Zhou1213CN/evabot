@@ -939,22 +939,31 @@ class WeixinChannel(BaseChannel):
             self._assert_session_active()
         except RuntimeError:
             return
+        
+        target_id = msg.receiver_id
+        if not target_id:
+            if not self._context_tokens:
+                logger.warning("WeChat: 无法发送系统广播，当前没有任何活跃的联系人上下文。")
+                return
+            # 专属管家策略：默认路由给最近一个与机器人互动过的用户
+            target_id = list(self._context_tokens.keys())[-1]
+            logger.info(f"WeChat: 系统广播自动路由至最近活跃用户 {target_id}")
 
         content = (msg.content or "").strip()
-        ctx_token = self._context_tokens.get(msg.receiver_id, "")
+        ctx_token = self._context_tokens.get(target_id, "")
         if not ctx_token:
-            logger.warning(f"WeChat: no context_token for chat_id={msg.receiver_id}, cannot send")
+            logger.warning(f"WeChat: no context_token for chat_id={target_id}, cannot send")
             return
 
         typing_ticket = ""
         try:
-            typing_ticket = await self._get_typing_ticket(msg.receiver_id, ctx_token)
+            typing_ticket = await self._get_typing_ticket(target_id, ctx_token)
         except Exception:
             typing_ticket = ""
 
         if typing_ticket:
             try:
-                await self._send_typing(msg.receiver_id, typing_ticket, TYPING_STATUS_TYPING)
+                await self._send_typing(target_id, typing_ticket, TYPING_STATUS_TYPING)
             except Exception:
                 pass
 
@@ -962,7 +971,7 @@ class WeixinChannel(BaseChannel):
         typing_keepalive_task: asyncio.Task | None = None
         if typing_ticket:
             typing_keepalive_task = asyncio.create_task(
-                self._typing_keepalive_loop(msg.receiver_id, typing_ticket, typing_keepalive_stop)
+                self._typing_keepalive_loop(target_id, typing_ticket, typing_keepalive_stop)
             )
 
         try:
@@ -970,12 +979,12 @@ class WeixinChannel(BaseChannel):
             media_paths = [art.uri for art in msg.artifacts] if msg.artifacts else []
             for media_path in media_paths:
                 try:
-                    await self._send_media_file(msg.receiver_id, media_path, ctx_token)
+                    await self._send_media_file(target_id, media_path, ctx_token)
                 except Exception as e:
                     filename = Path(media_path).name
                     logger.error(f"Failed to send WeChat media {media_path}: {e}")
                     await self._send_text(
-                        msg.receiver_id, f"[Failed to send: {filename}]", ctx_token,
+                        target_id, f"[Failed to send: {filename}]", ctx_token,
                     )
 
             if not content:
@@ -983,7 +992,7 @@ class WeixinChannel(BaseChannel):
 
             chunks = split_message(content, WEIXIN_MAX_MESSAGE_LEN)
             for chunk in chunks:
-                await self._send_text(msg.receiver_id, chunk, ctx_token)
+                await self._send_text(target_id, chunk, ctx_token)
         except Exception as e:
             logger.error(f"Error sending WeChat message: {e}")
             raise
@@ -998,7 +1007,7 @@ class WeixinChannel(BaseChannel):
 
             if typing_ticket:
                 try:
-                    await self._send_typing(msg.receiver_id, typing_ticket, TYPING_STATUS_CANCEL)
+                    await self._send_typing(target_id, typing_ticket, TYPING_STATUS_CANCEL)
                 except Exception:
                     pass
 

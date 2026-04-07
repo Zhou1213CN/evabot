@@ -69,6 +69,7 @@ class MessageType(str, Enum):
     PERMISSION = "permission"
     REPORT = "report"
     EXTRA = "extra"
+    SCHEDULE = "schedule"
 
 
 #身份类别
@@ -121,7 +122,6 @@ class TaskNode(_Schema):
 class Task(_Schema):
     """任务总上下文容器（仅做元数据与树的入口）"""
     solve_id: str = Field(description="总任务的唯一标识")
-    channel_id: str = Field(description="用户在哪个渠道发起的任务")
     root_node_id: str = Field(description="根节点的 node_id（通常与 solve_id 相同）")
 
 

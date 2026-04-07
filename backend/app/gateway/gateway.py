@@ -120,28 +120,31 @@ class InMemoryContextStore:
 
     def get(self, owner: Component, context_id: str) -> Optional[Context]:
         owner = self._get_effective_owner(owner)
-        if not context_id:
-            return None
-            
-        # 映射键值：如果是 BUTLER，强制查询空字符串键 ""
-        store_key_id = "" if owner == Component.BUTLER else context_id
+        
+        # 核心逻辑：全局唯一的 BUTLER 层无需校验 context_id 是否为空
+        if owner == Component.BUTLER:
+            store_key_id = ""
+        else:
+            if not context_id:
+                return None
+            store_key_id = context_id
 
         with self._lock:
             if (owner, store_key_id) in self.store:
                 ctx = self.store[(owner, store_key_id)]
-                # 动态把网关传来的 context_id 挂载给全局 ctx，保证消息能被正确路由回当前前端
-                if owner == Component.BUTLER:
+                # 动态把网关传来的 context_id 挂载给全局 ctx，保证消息能正确路由回触发请求的前端
+                if owner == Component.BUTLER and context_id:
                     ctx.owner_id = context_id
                 return ctx
             
-            file_path = self._get_file_path(owner, context_id)
+            file_path = self._get_file_path(owner, context_id or "")
             if os.path.exists(file_path):
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
                         ctx = Context.model_validate(data)
                         
-                        if owner == Component.BUTLER:
+                        if owner == Component.BUTLER and context_id:
                             ctx.owner_id = context_id
                             
                         self.store[(owner, store_key_id)] = ctx
@@ -153,34 +156,40 @@ class InMemoryContextStore:
 
     def set(self, owner: Component, ctx: Context, context_id: str) -> None:
         owner = self._get_effective_owner(owner)
-        if context_id:
-            # 映射键值：如果是 BUTLER，强制存入空字符串键 ""
-            store_key_id = "" if owner == Component.BUTLER else context_id
+        
+        if owner == Component.BUTLER:
+            store_key_id = ""
+        else:
+            if not context_id:
+                return
+            store_key_id = context_id
             
-            with self._lock:
-                self.store[(owner, store_key_id)] = ctx
-            try:
-                file_path = self._get_file_path(owner, context_id)
-                ctx.work_dir = os.path.dirname(file_path)
-                os.makedirs(ctx.work_dir, exist_ok=True)
-                with open(file_path, "w", encoding="utf-8") as f:
-                    json.dump(ctx.model_dump(mode='json'), f, ensure_ascii=False, indent=2)
-            except Exception as e:
-                log_event(logger, "CONTEXT_SAVE_FAILED", work_path=getattr(ctx, 'work_dir', 'unknown'), error=str(e), level=40)
+        with self._lock:
+            self.store[(owner, store_key_id)] = ctx
+        try:
+            file_path = self._get_file_path(owner, context_id or "")
+            ctx.work_dir = os.path.dirname(file_path)
+            os.makedirs(ctx.work_dir, exist_ok=True)
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(ctx.model_dump(mode='json'), f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log_event(logger, "CONTEXT_SAVE_FAILED", work_path=getattr(ctx, 'work_dir', 'unknown'), error=str(e), level=40)
 
     def exists(self, owner: Component, context_id: str) -> bool:
         owner = self._get_effective_owner(owner)
-        if not context_id:
-            return False
-            
-        # 映射键值：如果是 BUTLER，强制查询空字符串键 ""
-        store_key_id = "" if owner == Component.BUTLER else context_id
         
+        if owner == Component.BUTLER:
+            store_key_id = ""
+        else:
+            if not context_id:
+                return False
+            store_key_id = context_id
+            
         with self._lock:
             if (owner, store_key_id) in self.store:
                 return True
-            file_path = self._get_file_path(owner, context_id)
-            return os.path.exists(file_path)
+        file_path = self._get_file_path(owner, context_id or "")
+        return os.path.exists(file_path)
 
 # ----------------------------
 # 3) Gateway：快速校验 + 异步落库
@@ -335,15 +344,17 @@ class Gateway:
         target_q = self._routes.get(target_component)
 
         if ctx is None:
-            file_path = self.store._get_file_path(target_component, context_id)
+            effective_owner = self.store._get_effective_owner(target_component)
+            file_path = self.store._get_file_path(effective_owner, context_id or "")
             work_path = os.path.dirname(file_path)
 
+            # 兼容 context_id 为 None 的广播场景，提供基础兜底防止 Pydantic 崩溃
             ctx = Context(
-                owner_id=context_id,
-                owner=target_component, 
+                owner_id=context_id or "default",
+                owner=effective_owner, 
                 permission_type=msg.data.get("permission_type", "smart") if msg.data else "smart",
                 work_dir=work_path,
-                model_id=self.llmcfg.defaults.get(target_component, None)
+                model_id=self.llmcfg.defaults.get(effective_owner, None)
             )
             msg.message_role = MessageRole.USER
             
@@ -410,32 +421,22 @@ class Gateway:
             # ----------------------------------------------------
             if msg.send_type == SendType.USER:
                 target_component = Component.USER
-                if msg.sender == Component.BUTLER:
-                    target_id = msg.sender_id # Butler 层发送，其 sender_id 本身就是 channel_id
-                else:
-                    task = self.task_manager.get_task(msg.sender_id) or self.task_manager.get_task_by_node_id(msg.sender_id)
-                    if task:
-                        target_id = task.channel_id
-                    else:
-                        raise ValueError(f"Cannot find task for sender {msg.sender_id} to extract channel_id")
 
             elif msg.sender == Component.USER:
                 target_component = Component.BUTLER
-                target_id = msg.sender_id # User 发送的 sender_id 就是 channel_id
+                target_id = msg.sender_id 
 
             elif msg.sender == Component.BUTLER:
                 if msg.send_type == SendType.DOWNWARD:
                     target_component = Component.SOLVER
                     if not target_id:
                         # 交互层发往下层无明确ID时创建新的主 Task，注意属性变更为 tool_call_id
-                        task = self.task_manager.create_task(channel_id=msg.sender_id, goal=msg.content, tool_call_id=msg.tool_call_id,model=self.llmcfg.defaults.get(target_component, None))
+                        task = self.task_manager.create_task(goal=msg.content, tool_call_id=msg.tool_call_id,model=self.llmcfg.defaults.get(target_component, None))
                         target_id = task.solve_id
 
             elif msg.sender == Component.SOLVER:
                 if msg.send_type == SendType.UPWARD:
                     target_component = Component.BUTLER
-                    task = self.task_manager.get_task(msg.sender_id)
-                    target_id = task.channel_id if task else None
                 elif msg.send_type == SendType.DOWNWARD:
                     target_component = Component.WORKER
                     if not target_id:
@@ -480,8 +481,11 @@ class Gateway:
                         )
                         target_id = node.node_id
 
-            if not target_component or not target_id:
-                raise ValueError(f"Could not determine target for sender:{msg.sender} send_type:{msg.send_type}")
+            if not target_component:
+                raise ValueError(f"Could not determine target component for sender:{msg.sender} send_type:{msg.send_type}")
+            
+            if target_component != Component.USER and not target_id:
+                raise ValueError(f"Could not determine target ID for sender:{msg.sender} send_type:{msg.send_type}")
 
             msg.receiver_id = target_id
             

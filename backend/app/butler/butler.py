@@ -10,11 +10,11 @@ from backend.llm.llm import call_llm
 from backend.core.log import get_logger, log_event
 from .call_solver import get_solver_tool_schema, SolverTrigger
 from backend.core.base_tools import get_base_tool, execute_tool
-from backend.core.utils import load_prompt, extract_json
+from backend.core.utils import load_prompt, extract_json, utc_now
 
 logger = get_logger("butler")
 
-need_tools = ['communicate_with_downstream']
+need_tools = ['communicate_with_downstream','add_schedule']
 
 class ButlerService:
     def __init__(self, gateway: Gateway):
@@ -116,7 +116,7 @@ class ButlerService:
             # B) 调用 LLM (Stateless call based on Context)
             response_msg = call_llm(
                 ctx=ctx,
-                system_prompt=self._system_prompt,
+                system_prompt=self._system_prompt+f"\n\n当前系统时间为：{utc_now().strftime('%Y-%m-%d %H:%M:%S UTC')}",
                 tools=self._tools_schema     
                 )
 

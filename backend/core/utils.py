@@ -40,10 +40,10 @@ def gen_id(prefix: str = "") -> str:
 
 
 def utc_now() -> datetime:
-    """
-    统一使用 UTC 时间（timezone-aware datetime），避免组件之间时区混乱。
-    """
-    return datetime.now(timezone.utc)
+    # """
+    # 统一使用 UTC 时间（timezone-aware datetime），避免组件之间时区混乱。
+    # """
+    return datetime.now()
 
 
 # ----------------------------
