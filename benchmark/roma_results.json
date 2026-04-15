@@ -1,0 +1,50 @@
+{
+  "model": "deepseek-chat",
+  "framework": "DSPy ChainOfThought (ROMA)",
+  "total_questions": 5,
+  "correct": 1,
+  "accuracy_pct": 20.0,
+  "avg_latency_s": 9.85,
+  "results": [
+    {
+      "id": 0,
+      "question": "Who holds the all-time record at the Grammys for the most wins in the album of the year category?",
+      "ground_truth": "Serban Ghenea",
+      "predicted": "Serban Ghenea",
+      "correct": true,
+      "latency_s": 9.45
+    },
+    {
+      "id": 1,
+      "question": "How many NBA players have scored 60 or more points in a regular season game since 2023?",
+      "ground_truth": "12 players",
+      "predicted": "6",
+      "correct": false,
+      "latency_s": 14.01
+    },
+    {
+      "id": 2,
+      "question": "What is the most recent film to join the top 10 highest-grossing films of all time?",
+      "ground_truth": "Zootopia 2",
+      "predicted": "Avatar: The Way of Water",
+      "correct": false,
+      "latency_s": 8.67
+    },
+    {
+      "id": 3,
+      "question": "What is the current age of the last American experimental physicist to win the Nobel Prize in Physics?",
+      "ground_truth": "84 years old",
+      "predicted": "83",
+      "correct": false,
+      "latency_s": 12.35
+    },
+    {
+      "id": 4,
+      "question": "How many airlines are members of IATA, the organization that supports airline activity and helps formulate industry policy and standards?",
+      "ground_truth": "370",
+      "predicted": "352",
+      "correct": false,
+      "latency_s": 4.77
+    }
+  ]
+}
