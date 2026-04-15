@@ -34,20 +34,85 @@ HEADERS = {
 def fetch_url_content(url: str, timeout: int = 15) -> dict:
     """
     抓取单个 URL 的网页内容，转换为 Markdown 格式。
+    若 URL 含有 anchor（#section），则智能定位并只提取该小节内容（±20000字符窗口）。
     返回 {"url": ..., "snippet": ...}
     """
-    # 处理 Wikipedia fragment URL（截断 #:~:text= 部分）
-    clean_url = url.split("#:~:text=")[0].split("#")[0]
+    from bs4 import BeautifulSoup
+
+    # 分离 anchor（处理 #:~:text= 和普通 # 两种形式）
+    if "#:~:text=" in url:
+        clean_url, text_fragment = url.split("#:~:text=", 1)
+        anchor = None
+    elif "#" in url:
+        clean_url, anchor = url.split("#", 1)
+        text_fragment = None
+    else:
+        clean_url = url
+        anchor = None
+        text_fragment = None
 
     try:
         resp = requests.get(clean_url, headers=HEADERS, timeout=timeout)
         resp.raise_for_status()
-        # 将 HTML 转为 Markdown，截取前 3000 字符避免 token 爆炸
-        text = md(resp.text, strip=["script", "style", "nav", "footer"])
-        # 清理多余空行
+        html = resp.text
+
+        # ── 优先：用 anchor 定位具体小节 ──────────────────────────
+        if anchor:
+            soup = BeautifulSoup(html, "html.parser")
+            target = soup.find(id=anchor) or soup.find(attrs={"name": anchor})
+            if target:
+                # 确定当前锚点所在的标题层级（h2/h3/h4 或非标题元素）
+                heading_tags = {"h1", "h2", "h3", "h4", "h5", "h6"}
+                anchor_tag = target.name if target.name in heading_tags else None
+                # 向上找父标题（锚点可能在 span 内）
+                if not anchor_tag:
+                    parent = target.parent
+                    if parent and parent.name in heading_tags:
+                        anchor_tag = parent.name
+                        target = parent
+
+                stop_tags = set()
+                if anchor_tag:
+                    level = int(anchor_tag[1])
+                    stop_tags = {f"h{i}" for i in range(1, level + 1)}
+
+                chunks = [str(target)]
+                for sibling in target.find_next_siblings():
+                    tag = sibling.name
+                    # 只在遇到同级或更高级标题时停止
+                    if stop_tags and tag in stop_tags:
+                        break
+                    chunks.append(str(sibling))
+                    if sum(len(c) for c in chunks) > 80000:
+                        break
+
+                section_html = "\n".join(chunks)
+                text = md(section_html, strip=["script", "style", "nav", "footer"])
+                lines = [l for l in text.splitlines() if l.strip()]
+                snippet = "\n".join(lines)
+                if len(snippet) > 500:  # 成功提取到内容
+                    return {"url": url, "snippet": snippet, "error": None}
+                # 内容太少则回退到 text_fragment 或兜底逻辑
+
+        # ── 备选：用 text fragment 关键词定位段落 ─────────────────
+        if text_fragment:
+            import urllib.parse
+            keyword = urllib.parse.unquote(text_fragment.split("%0A")[0])[:80]
+            full_text = md(html, strip=["script", "style", "nav", "footer"])
+            lines = [l for l in full_text.splitlines() if l.strip()]
+            full_text = "\n".join(lines)
+            idx = full_text.lower().find(keyword.lower()[:40])
+            if idx != -1:
+                start = max(0, idx - 2000)
+                snippet = full_text[start: idx + 30000]
+                return {"url": url, "snippet": snippet, "error": None}
+
+        # ── 兜底：整页转 Markdown，取前 30000 字符 ────────────────
+        text = md(html, strip=["script", "style", "nav", "footer"])
         lines = [l for l in text.splitlines() if l.strip()]
-        snippet = "\n".join(lines)[:8000]
+        snippet = "\n".join(lines)[:30000]
         return {"url": url, "snippet": snippet, "error": None}
+
     except Exception as e:
         return {"url": url, "snippet": "", "error": str(e)}
 

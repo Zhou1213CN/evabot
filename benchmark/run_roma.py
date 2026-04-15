@@ -65,7 +65,7 @@ def format_sources(sources: list) -> str:
     parts = []
     for i, s in enumerate(sources):
         url = s.get("url", "unknown")
-        snippet = s.get("snippet", "").strip()[:7000]
+        snippet = s.get("snippet", "").strip()  # 不截断
         if snippet:
             parts.append(f"[Source {i+1}] ({url})\n{snippet}")
     return "\n\n---\n\n".join(parts) if parts else "No sources available."
