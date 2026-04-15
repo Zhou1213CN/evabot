@@ -3,62 +3,62 @@
   "total_questions": 5,
   "correct": 1,
   "accuracy_pct": 20.0,
-  "avg_latency_s": 12.34,
+  "avg_latency_s": 9.27,
   "results": [
     {
       "id": 0,
       "question": "Who holds the all-time record at the Grammys for the most wins in the album of the year category?",
       "ground_truth": "Serban Ghenea",
       "predicted": "Serban Ghenea",
-      "raw_response": "Based on the provided fact, the record holder is Serban Ghenea, who has five wins in the Album of the Year category in his role as an engineer/mixer.\n\nFINAL ANSWER: Serban Ghenea",
+      "raw_response": "Based on the provided information, the explicit record holder for most wins in the Grammy Album of the Year category is Serban Ghenea, with five wins in his role as an engineer/mixer.\n\nFINAL ANSWER: Serban Ghenea",
       "correct": true,
-      "latency_s": 11.95,
-      "worker_latency_s": 7.66,
-      "solver_latency_s": 4.25
+      "latency_s": 9.85,
+      "worker_latency_s": 7.12,
+      "solver_latency_s": 2.7
     },
     {
       "id": 1,
       "question": "How many NBA players have scored 60 or more points in a regular season game since 2023?",
       "ground_truth": "12 players",
       "predicted": "Information not available",
-      "raw_response": "Based on the provided source, there is no factual information available to answer the question. The source contains only technical metadata and no data about NBA scoring records.\n\nFINAL ANSWER: Information not available",
+      "raw_response": "Based on the provided source, there is no factual information available to answer the question. The source contains only interface elements and no relevant data.\n\nFINAL ANSWER: Information not available",
       "correct": false,
-      "latency_s": 9.46,
-      "worker_latency_s": 5.65,
-      "solver_latency_s": 3.77
+      "latency_s": 6.18,
+      "worker_latency_s": 3.92,
+      "solver_latency_s": 2.23
     },
     {
       "id": 2,
       "question": "What is the most recent film to join the top 10 highest-grossing films of all time?",
       "ground_truth": "Zootopia 2",
-      "predicted": "[No answer from provided source]",
-      "raw_response": "Based on the provided source, there is no factual information to answer the question. The source contains only technical metadata and no data about films or box office rankings.\n\nFINAL ANSWER: [No answer from provided source]",
+      "predicted": "[No answer can be determined from the provided facts]",
+      "raw_response": "Based on the provided information, there are no relevant facts to determine the answer. The extracted facts are from a source that contains no data about film rankings or release dates.\n\nFINAL ANSWER: [No answer can be determined from the provided facts]",
       "correct": false,
-      "latency_s": 10.86,
-      "worker_latency_s": 6.99,
-      "solver_latency_s": 3.84
+      "latency_s": 6.33,
+      "worker_latency_s": 3.45,
+      "solver_latency_s": 2.84
     },
     {
       "id": 3,
       "question": "What is the current age of the last American experimental physicist to win the Nobel Prize in Physics?",
       "ground_truth": "84 years old",
-      "predicted": "81",
-      "raw_response": "The last American experimental physicist to win the Nobel Prize in Physics is John Clauser, who won in 2022. He was born on December 1, 1942, making him 81 years old as of 2024.  \nFINAL ANSWER: 81",
+      "predicted": "83",
+      "raw_response": "John Clauser, born in 1942, is an American experimental physicist who won the Nobel Prize in Physics in 2022, making him the most recent American experimental physicist to win. As of 2025, he is 83 years old.\n\nFINAL ANSWER: 83",
       "correct": false,
-      "latency_s": 21.33,
-      "worker_latency_s": 16.93,
-      "solver_latency_s": 4.33
+      "latency_s": 18.34,
+      "worker_latency_s": 15.42,
+      "solver_latency_s": 2.85
     },
     {
       "id": 4,
       "question": "How many airlines are members of IATA, the organization that supports airline activity and helps formulate industry policy and standards?",
       "ground_truth": "370",
       "predicted": "352",
-      "raw_response": "Based on the provided information, the most direct and recent fact states there are 352 airline members. There are no contradictory facts to evaluate against.\n\nFINAL ANSWER: 352",
+      "raw_response": "Based on the provided source, the IATA website directly states there are 352 airline members. This is the most authoritative and specific figure available.  \n\nFINAL ANSWER: 352",
       "correct": false,
-      "latency_s": 8.11,
-      "worker_latency_s": 4.17,
-      "solver_latency_s": 3.91
+      "latency_s": 5.64,
+      "worker_latency_s": 3.25,
+      "solver_latency_s": 2.34
     }
   ]
 }

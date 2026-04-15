@@ -65,7 +65,7 @@ def format_sources(sources: list) -> str:
     parts = []
     for i, s in enumerate(sources):
         url = s.get("url", "unknown")
-        snippet = s.get("snippet", "").strip()[:2500]
+        snippet = s.get("snippet", "").strip()[:7000]
         if snippet:
             parts.append(f"[Source {i+1}] ({url})\n{snippet}")
     return "\n\n---\n\n".join(parts) if parts else "No sources available."
@@ -100,7 +100,7 @@ def main():
         api_key=DEEPSEEK_KEY,
         api_base="https://api.deepseek.com/v1",
         temperature=0.1,
-        max_tokens=512,
+        max_tokens=2048,
     )
     dspy.configure(lm=lm)
 

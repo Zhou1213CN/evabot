@@ -4,7 +4,7 @@
   "total_questions": 5,
   "correct": 1,
   "accuracy_pct": 20.0,
-  "avg_latency_s": 9.85,
+  "avg_latency_s": 13.07,
   "results": [
     {
       "id": 0,
@@ -12,15 +12,15 @@
       "ground_truth": "Serban Ghenea",
       "predicted": "Serban Ghenea",
       "correct": true,
-      "latency_s": 9.45
+      "latency_s": 9.65
     },
     {
       "id": 1,
       "question": "How many NBA players have scored 60 or more points in a regular season game since 2023?",
       "ground_truth": "12 players",
-      "predicted": "6",
+      "predicted": "Unknown",
       "correct": false,
-      "latency_s": 14.01
+      "latency_s": 20.07
     },
     {
       "id": 2,
@@ -28,7 +28,7 @@
       "ground_truth": "Zootopia 2",
       "predicted": "Avatar: The Way of Water",
       "correct": false,
-      "latency_s": 8.67
+      "latency_s": 7.05
     },
     {
       "id": 3,
@@ -36,7 +36,7 @@
       "ground_truth": "84 years old",
       "predicted": "83",
       "correct": false,
-      "latency_s": 12.35
+      "latency_s": 24.8
     },
     {
       "id": 4,
@@ -44,7 +44,7 @@
       "ground_truth": "370",
       "predicted": "352",
       "correct": false,
-      "latency_s": 4.77
+      "latency_s": 3.8
     }
   ]
 }

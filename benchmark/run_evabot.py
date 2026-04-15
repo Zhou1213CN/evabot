@@ -100,7 +100,7 @@ def worker_stage(question: str, sources: list) -> tuple:
             {"role": "system", "content": WORKER_SYSTEM},
             {"role": "user",   "content": (
                 f"Question: {question}\n\n"
-                f"--- Source {i+1} ({src.get('url', 'unknown')}) ---\n{snippet[:2500]}"
+                f"--- Source {i+1} ({src.get('url', 'unknown')}) ---\n{snippet[:7000]}"
             )},
         ]
         facts, lat = llm_call(messages)

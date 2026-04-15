@@ -46,7 +46,7 @@ def fetch_url_content(url: str, timeout: int = 15) -> dict:
         text = md(resp.text, strip=["script", "style", "nav", "footer"])
         # 清理多余空行
         lines = [l for l in text.splitlines() if l.strip()]
-        snippet = "\n".join(lines)[:3000]
+        snippet = "\n".join(lines)[:8000]
         return {"url": url, "snippet": snippet, "error": None}
     except Exception as e:
         return {"url": url, "snippet": "", "error": str(e)}
