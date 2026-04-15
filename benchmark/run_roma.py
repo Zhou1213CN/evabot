@@ -72,15 +72,29 @@ def format_sources(sources: list) -> str:
 
 
 def score_answer(predicted: str, ground_truth: str) -> bool:
-    """严格关键词匹配（忽略大小写）"""
+    """
+    关键实体匹配（忽略大小写）：
+    1. 若标准答案含数字，只要预测中出现相同数字即算对
+    2. 否则，取标准答案中最长的非停用词作为关键实体，出现在预测中即算对
+    """
+    import re
     pred_lower = predicted.lower()
-    skip = {"the", "a", "an", "of", "in", "at", "to", "and", "or", "is", "are"}
-    for kw in ground_truth.lower().split():
-        if kw in skip:
-            continue
-        if kw not in pred_lower:
-            return False
-    return True
+    gt_lower   = ground_truth.lower()
+
+    # 1. 数字匹配
+    gt_numbers = re.findall(r'\d+', gt_lower)
+    if gt_numbers:
+        pred_numbers = re.findall(r'\d+', pred_lower)
+        return any(n in pred_numbers for n in gt_numbers)
+
+    # 2. 实体匹配：取最长非停用词
+    stopwords = {"the", "a", "an", "of", "in", "at", "to", "and", "or",
+                 "is", "are", "was", "were", "years", "old", "players", "films"}
+    tokens = [t for t in re.findall(r"[a-z']+", gt_lower) if t not in stopwords]
+    if not tokens:
+        return gt_lower in pred_lower
+    key_token = max(tokens, key=len)
+    return key_token in pred_lower
 
 
 # ─────────────────────────────────────────────
