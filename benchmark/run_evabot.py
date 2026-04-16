@@ -120,7 +120,7 @@ Be precise and verbatim. If the source is irrelevant, say so.
 # ─────────────────────────────────────────────
 
 def llm_call(messages: list, tools=None, retries: int = 3) -> tuple:
-    """返回 (response_message_dict, latency_s)"""
+    """返回 (response_message, latency_s, input_tokens, output_tokens)"""
     for attempt in range(retries):
         try:
             t0 = time.time()
@@ -130,12 +130,13 @@ def llm_call(messages: list, tools=None, retries: int = 3) -> tuple:
             resp = client.chat.completions.create(**kwargs)
             latency = round(time.time() - t0, 2)
             msg = resp.choices[0].message
-            return msg, latency
+            usage = resp.usage
+            return msg, latency, usage.prompt_tokens, usage.completion_tokens
         except Exception as e:
             print(f"    [重试 {attempt+1}/{retries}] {type(e).__name__}: {e}")
             if attempt < retries - 1:
                 time.sleep(3 * (attempt + 1))
-    return None, 0.0
+    return None, 0.0, 0, 0
 
 
 # ─────────────────────────────────────────────
@@ -143,11 +144,11 @@ def llm_call(messages: list, tools=None, retries: int = 3) -> tuple:
 # ─────────────────────────────────────────────
 
 def run_worker(question: str, source: dict, aspect: str) -> tuple:
-    """Worker 分析指定来源，返回 (facts_text, latency_s)"""
+    """Worker 分析指定来源，返回 (facts_text, latency_s, in_tokens, out_tokens)"""
     snippet = source.get("snippet", "").strip()
     url     = source.get("url", "unknown")
     if not snippet:
-        return "Source is empty.", 0.0
+        return "Source is empty.", 0.0, 0, 0
 
     messages = [
         {"role": "system", "content": WORKER_SYSTEM},
@@ -158,8 +159,8 @@ def run_worker(question: str, source: dict, aspect: str) -> tuple:
             f"{snippet}"
         )},
     ]
-    msg, lat = llm_call(messages)
-    return (msg.content or "[No output]") if msg else "[Worker failed]", lat
+    msg, lat, in_tok, out_tok = llm_call(messages)
+    return (msg.content or "[No output]") if msg else "[Worker failed]", lat, in_tok, out_tok
 
 
 # ─────────────────────────────────────────────
@@ -187,16 +188,19 @@ def run_solver(question: str, sources: list) -> tuple:
     ]
 
     total_latency   = 0.0
+    total_in_tok    = 0
+    total_out_tok   = 0
     worker_calls    = 0
 
     for round_idx in range(MAX_SOLVER_ROUNDS):
-        msg, lat = llm_call(messages, tools=SOLVER_TOOLS)
-        total_latency += lat
+        msg, lat, in_tok, out_tok = llm_call(messages, tools=SOLVER_TOOLS)
+        total_latency  += lat
+        total_in_tok   += in_tok
+        total_out_tok  += out_tok
 
         if msg is None:
-            return "[Solver failed]", total_latency, worker_calls
+            return "[Solver failed]", total_latency, worker_calls, total_in_tok, total_out_tok
 
-        # 把 Solver 的回复加入历史
         msg_dict = {"role": "assistant", "content": msg.content or ""}
         if msg.tool_calls:
             msg_dict["tool_calls"] = [
@@ -209,11 +213,9 @@ def run_solver(question: str, sources: list) -> tuple:
             ]
         messages.append(msg_dict)
 
-        # 没有 tool call → Solver 直接用文字给出了答案
         if not msg.tool_calls:
-            return msg.content or "[No answer]", total_latency, worker_calls
+            return msg.content or "[No answer]", total_latency, worker_calls, total_in_tok, total_out_tok
 
-        # 处理 tool calls
         all_done = False
         for tc in msg.tool_calls:
             func_name = tc.function.name
@@ -225,21 +227,22 @@ def run_solver(question: str, sources: list) -> tuple:
             if func_name == "final_answer":
                 all_done = True
                 answer = args.get("answer", "[No answer]")
-                # 把 tool result 加回去（保持对话完整性）
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "content": "Answer submitted."
                 })
-                return answer, total_latency, worker_calls
+                return answer, total_latency, worker_calls, total_in_tok, total_out_tok
 
             elif func_name == "analyze_source":
                 source_id = args.get("source_id", 1)
                 aspect    = args.get("aspect", question)
                 src_idx   = source_id - 1
                 if 0 <= src_idx < len(sources):
-                    facts, w_lat = run_worker(question, sources[src_idx], aspect)
+                    facts, w_lat, w_in, w_out = run_worker(question, sources[src_idx], aspect)
                     total_latency += w_lat
+                    total_in_tok  += w_in
+                    total_out_tok += w_out
                     worker_calls  += 1
                     tool_result = facts
                 else:
@@ -254,7 +257,7 @@ def run_solver(question: str, sources: list) -> tuple:
         if all_done:
             break
 
-    return "[Max rounds reached]", total_latency, worker_calls
+    return "[Max rounds reached]", total_latency, worker_calls, total_in_tok, total_out_tok
 
 
 # ─────────────────────────────────────────────
@@ -334,14 +337,15 @@ def main():
         print(f"[{i+1}/{len(dataset)}] Q: {question[:80]}")
         print(f"  标准答案: {answer}")
 
-        predicted, latency, n_workers = run_solver(question, sources)
+        predicted, latency, n_workers, in_tok, out_tok = run_solver(question, sources)
+        total_tokens = in_tok + out_tok
         is_correct = score_answer(predicted, answer)
         if is_correct:
             correct += 1
 
         status = "✅" if is_correct else "❌"
         print(f"  预测答案: {predicted[:120]}")
-        print(f"  {status}  耗时: {latency}s  Worker调用: {n_workers}次\n")
+        print(f"  {status}  耗时: {latency}s  Worker: {n_workers}次  Token: {in_tok}↑ {out_tok}↓ (共{total_tokens})\n")
 
         results.append({
             "id": item["id"],
@@ -351,12 +355,20 @@ def main():
             "correct": is_correct,
             "latency_s": latency,
             "worker_calls": n_workers,
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
+            "total_tokens": total_tokens,
         })
 
     total    = len(results)
     accuracy = round(correct / total * 100, 1) if total else 0
     avg_lat  = round(sum(r["latency_s"] for r in results) / total, 2) if total else 0
     avg_w    = round(sum(r["worker_calls"] for r in results) / total, 1) if total else 0
+
+    avg_in_tok  = round(sum(r["input_tokens"]  for r in results) / total, 0) if total else 0
+    avg_out_tok = round(sum(r["output_tokens"] for r in results) / total, 0) if total else 0
+    avg_tok     = round(sum(r["total_tokens"]  for r in results) / total, 0) if total else 0
+    total_tok   = sum(r["total_tokens"] for r in results)
 
     summary = {
         "model": MODEL,
@@ -366,6 +378,10 @@ def main():
         "accuracy_pct": accuracy,
         "avg_latency_s": avg_lat,
         "avg_worker_calls": avg_w,
+        "avg_input_tokens": avg_in_tok,
+        "avg_output_tokens": avg_out_tok,
+        "avg_total_tokens": avg_tok,
+        "grand_total_tokens": total_tok,
         "results": results,
     }
     with open(args.output, "w", encoding="utf-8") as f:
@@ -380,6 +396,8 @@ def main():
     print(f"  准确率            : {accuracy}%")
     print(f"  平均耗时          : {avg_lat}s / 题")
     print(f"  平均 Worker 调用  : {avg_w}次 / 题")
+    print(f"  平均 Token 消耗   : {avg_tok} / 题  (输入{avg_in_tok} + 输出{avg_out_tok})")
+    print(f"  总 Token 消耗     : {total_tok}")
     print(f"  结果已保存        : {args.output}")
     print(f"{'='*60}\n")
 

@@ -124,7 +124,8 @@ def main():
         api_key=DEEPSEEK_KEY,
         api_base="https://api.deepseek.com/v1",
         temperature=0.1,
-        max_tokens=2048,
+        max_tokens=8192,
+        cache=False,   # 禁用缓存，确保每题都发真实请求并记录 token
     )
     dspy.configure(lm=lm)
 
@@ -159,6 +160,9 @@ def main():
 
         sources_str = format_sources(sources)
 
+        # 记录调用前的历史长度，用于计算本题消耗
+        history_before = len(lm.history)
+
         for attempt in range(3):
             try:
                 t0 = time.time()
@@ -173,13 +177,21 @@ def main():
                 else:
                     predicted, latency = "[调用失败]", 0.0
 
+        # 从 DSPy 历史中提取本题的 token 消耗
+        in_tok, out_tok = 0, 0
+        for h in lm.history[history_before:]:
+            usage = h.get("usage") or {}
+            in_tok  += usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
+            out_tok += usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
+        total_tokens = in_tok + out_tok
+
         is_correct = score_answer(predicted, answer)
         if is_correct:
             correct += 1
 
         status = "✅" if is_correct else "❌"
         print(f"  预测答案: {predicted[:120]}")
-        print(f"  {status}  耗时: {latency}s\n")
+        print(f"  {status}  耗时: {latency}s  Token: {in_tok}↑ {out_tok}↓ (共{total_tokens})\n")
 
         results.append({
             "id": item["id"],
@@ -188,11 +200,19 @@ def main():
             "predicted": predicted,
             "correct": is_correct,
             "latency_s": latency,
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
+            "total_tokens": total_tokens,
         })
 
     total    = len(results)
     accuracy = round(correct / total * 100, 1) if total else 0
     avg_lat  = round(sum(r["latency_s"] for r in results) / total, 2) if total else 0
+
+    avg_in_tok  = round(sum(r["input_tokens"]  for r in results) / total, 0) if total else 0
+    avg_out_tok = round(sum(r["output_tokens"] for r in results) / total, 0) if total else 0
+    avg_tok     = round(sum(r["total_tokens"]  for r in results) / total, 0) if total else 0
+    total_tok   = sum(r["total_tokens"] for r in results)
 
     summary = {
         "model": "deepseek-chat",
@@ -201,6 +221,10 @@ def main():
         "correct": correct,
         "accuracy_pct": accuracy,
         "avg_latency_s": avg_lat,
+        "avg_input_tokens": avg_in_tok,
+        "avg_output_tokens": avg_out_tok,
+        "avg_total_tokens": avg_tok,
+        "grand_total_tokens": total_tok,
         "results": results,
     }
     with open(args.output, "w", encoding="utf-8") as f:
@@ -209,13 +233,15 @@ def main():
     print(f"\n{'='*60}")
     print(f"ROMA 测试结果汇总")
     print(f"{'='*60}")
-    print(f"  模型        : deepseek-chat")
-    print(f"  框架        : DSPy ChainOfThought")
-    print(f"  测试题数    : {total}")
-    print(f"  正确数      : {correct}")
-    print(f"  准确率      : {accuracy}%")
-    print(f"  平均耗时    : {avg_lat}s / 题")
-    print(f"  结果已保存  : {args.output}")
+    print(f"  模型              : deepseek-chat")
+    print(f"  框架              : DSPy ChainOfThought")
+    print(f"  测试题数          : {total}")
+    print(f"  正确数            : {correct}")
+    print(f"  准确率            : {accuracy}%")
+    print(f"  平均耗时          : {avg_lat}s / 题")
+    print(f"  平均 Token 消耗   : {avg_tok} / 题  (输入{avg_in_tok} + 输出{avg_out_tok})")
+    print(f"  总 Token 消耗     : {total_tok}")
+    print(f"  结果已保存        : {args.output}")
     print(f"{'='*60}\n")
 
 

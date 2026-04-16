@@ -2,10 +2,14 @@
   "model": "deepseek-chat",
   "architecture": "Butler→Solver(autonomous)→Worker(on-demand)",
   "total_questions": 5,
-  "correct": 2,
-  "accuracy_pct": 40.0,
-  "avg_latency_s": 63.62,
-  "avg_worker_calls": 3.2,
+  "correct": 3,
+  "accuracy_pct": 60.0,
+  "avg_latency_s": 50.48,
+  "avg_worker_calls": 2.8,
+  "avg_input_tokens": 31899.0,
+  "avg_output_tokens": 1154.0,
+  "avg_total_tokens": 33052.0,
+  "grand_total_tokens": 165262,
   "results": [
     {
       "id": 35,
@@ -13,17 +17,23 @@
       "ground_truth": "There won't be a FIFA's Women World Cup in 2026.",
       "predicted": "Canada, Mexico, United States",
       "correct": false,
-      "latency_s": 77.68,
-      "worker_calls": 5
+      "latency_s": 50.730000000000004,
+      "worker_calls": 3,
+      "input_tokens": 36703,
+      "output_tokens": 1147,
+      "total_tokens": 37850
     },
     {
       "id": 36,
       "question": "Who is the only female artist to have topped Spotify's list of most-streamed artists in three consecutive years (2020–2022)?",
       "ground_truth": "No one",
       "predicted": "No female artist achieved this",
-      "correct": false,
-      "latency_s": 62.66,
-      "worker_calls": 3
+      "correct": true,
+      "latency_s": 35.08,
+      "worker_calls": 2,
+      "input_tokens": 24428,
+      "output_tokens": 824,
+      "total_tokens": 25252
     },
     {
       "id": 37,
@@ -31,17 +41,23 @@
       "ground_truth": "Congolian rainforests",
       "predicted": "Congolian rainforests",
       "correct": true,
-      "latency_s": 41.49,
-      "worker_calls": 2
+      "latency_s": 67.94,
+      "worker_calls": 4,
+      "input_tokens": 48424,
+      "output_tokens": 1509,
+      "total_tokens": 49933
     },
     {
       "id": 38,
       "question": "How many countries did both Donald Trump (during his first term) and Joe Biden visit during their presidencies, including the West Bank?",
       "ground_truth": "18",
-      "predicted": "17",
+      "predicted": "12",
       "correct": false,
-      "latency_s": 101.5,
-      "worker_calls": 4
+      "latency_s": 69.91,
+      "worker_calls": 3,
+      "input_tokens": 30684,
+      "output_tokens": 1684,
+      "total_tokens": 32368
     },
     {
       "id": 39,
@@ -49,8 +65,11 @@
       "ground_truth": "Block sort",
       "predicted": "Block sort",
       "correct": true,
-      "latency_s": 34.790000000000006,
-      "worker_calls": 2
+      "latency_s": 28.759999999999998,
+      "worker_calls": 2,
+      "input_tokens": 19255,
+      "output_tokens": 604,
+      "total_tokens": 19859
     }
   ]
 }
