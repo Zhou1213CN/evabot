@@ -34,17 +34,20 @@
 
 ## 架构对比
 
-### Evabot（两阶段多智能体）
+### Evabot（Solver 自主决策 + 按需派 Worker）
 ```
-For each source:
-  Worker: "从这个网页里提取与问题相关的所有事实"
-          → 逐条返回摘要
+Butler 把问题交给 Solver
 
-Solver: "综合以上事实，输出唯一正确答案"
-        → FINAL ANSWER: <answer>
+Solver 主循环（最多8轮，带 tool_call）：
+  ├── analyze_source(source_id, aspect)
+  │     → Worker 执行：精读指定来源，返回事实摘要
+  │     → 结果以 tool message 回传给 Solver
+  └── final_answer(answer, reasoning)
+        → 提交最终答案，结束循环
 ```
-- 每道题发出 N+1 次 LLM 调用（N = 来源数量）
-- Worker 负责噪声过滤，Solver 负责冲突仲裁
+- **Solver 自主决策**：要不要派 Worker、派几次、关注哪个角度，完全由 Solver 决定
+- Worker 数量不固定（实测0~5次/题，平均2.4次）
+- Solver 可以在收到 Worker 反馈后继续追问，或直接给出答案
 
 ### ROMA（DSPy ChainOfThought 单阶段）
 ```
@@ -57,13 +60,13 @@ DSPy ChainOfThought(ConflictAwareQA):
 
 ---
 
-## Pilot 结果（5 题，使用智能小节提取 + 修正评分后）
+## Pilot 结果（5 题，Solver 自主派发架构 + 修正评分后）
 
-| 指标 | Evabot | ROMA |
-|------|--------|------|
+| 指标 | Evabot（Solver 自主）| ROMA (DSPy CoT) |
+|------|---------------------|-----------------|
 | 准确率 | 20% (1/5) | 40% (2/5) |
-| 平均耗时 | ~21.6s / 题 | ~27.6s / 题 |
-| LLM 调用次数 / 题 | N+1（来源数+1） | 1 |
+| 平均耗时 | ~54s / 题 | ~28s / 题 |
+| 平均 Worker 调用 | 2.4次 / 题（0~5不等） | — (单阶段) |
 
 ### 逐题详情
 

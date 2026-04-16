@@ -1,64 +1,56 @@
 {
   "model": "deepseek-chat",
+  "architecture": "Butler→Solver(autonomous)→Worker(on-demand)",
   "total_questions": 5,
   "correct": 1,
   "accuracy_pct": 20.0,
-  "avg_latency_s": 9.27,
+  "avg_latency_s": 54.37,
+  "avg_worker_calls": 2.4,
   "results": [
     {
       "id": 0,
       "question": "Who holds the all-time record at the Grammys for the most wins in the album of the year category?",
       "ground_truth": "Serban Ghenea",
-      "predicted": "Serban Ghenea",
-      "raw_response": "Based on the provided information, the explicit record holder for most wins in the Grammy Album of the Year category is Serban Ghenea, with five wins in his role as an engineer/mixer.\n\nFINAL ANSWER: Serban Ghenea",
-      "correct": true,
-      "latency_s": 9.85,
-      "worker_latency_s": 7.12,
-      "solver_latency_s": 2.7
+      "predicted": "Taylor Swift",
+      "correct": false,
+      "latency_s": 21.6,
+      "worker_calls": 1
     },
     {
       "id": 1,
       "question": "How many NBA players have scored 60 or more points in a regular season game since 2023?",
       "ground_truth": "12 players",
-      "predicted": "Information not available",
-      "raw_response": "Based on the provided source, there is no factual information available to answer the question. The source contains only interface elements and no relevant data.\n\nFINAL ANSWER: Information not available",
+      "predicted": "5",
       "correct": false,
-      "latency_s": 6.18,
-      "worker_latency_s": 3.92,
-      "solver_latency_s": 2.23
+      "latency_s": 79.51,
+      "worker_calls": 3
     },
     {
       "id": 2,
       "question": "What is the most recent film to join the top 10 highest-grossing films of all time?",
       "ground_truth": "Zootopia 2",
-      "predicted": "[No answer can be determined from the provided facts]",
-      "raw_response": "Based on the provided information, there are no relevant facts to determine the answer. The extracted facts are from a source that contains no data about film rankings or release dates.\n\nFINAL ANSWER: [No answer can be determined from the provided facts]",
+      "predicted": "Avatar: The Way of Water",
       "correct": false,
-      "latency_s": 6.33,
-      "worker_latency_s": 3.45,
-      "solver_latency_s": 2.84
+      "latency_s": 45.88,
+      "worker_calls": 2
     },
     {
       "id": 3,
       "question": "What is the current age of the last American experimental physicist to win the Nobel Prize in Physics?",
       "ground_truth": "84 years old",
       "predicted": "83",
-      "raw_response": "John Clauser, born in 1942, is an American experimental physicist who won the Nobel Prize in Physics in 2022, making him the most recent American experimental physicist to win. As of 2025, he is 83 years old.\n\nFINAL ANSWER: 83",
       "correct": false,
-      "latency_s": 18.34,
-      "worker_latency_s": 15.42,
-      "solver_latency_s": 2.85
+      "latency_s": 110.69,
+      "worker_calls": 5
     },
     {
       "id": 4,
       "question": "How many airlines are members of IATA, the organization that supports airline activity and helps formulate industry policy and standards?",
       "ground_truth": "370",
-      "predicted": "352",
-      "raw_response": "Based on the provided source, the IATA website directly states there are 352 airline members. This is the most authoritative and specific figure available.  \n\nFINAL ANSWER: 352",
-      "correct": false,
-      "latency_s": 5.64,
-      "worker_latency_s": 3.25,
-      "solver_latency_s": 2.34
+      "predicted": "370",
+      "correct": true,
+      "latency_s": 14.18,
+      "worker_calls": 1
     }
   ]
 }
