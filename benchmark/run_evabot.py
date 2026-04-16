@@ -292,12 +292,20 @@ def main():
     parser.add_argument("--limit",  type=int, default=None)
     parser.add_argument("--input",  type=str, default=str(INPUT_PATH))
     parser.add_argument("--output", type=str, default=str(OUTPUT_PATH))
+    parser.add_argument("--include-fast-changing", action="store_true",
+                        help="包含 fast-changing 题目（默认跳过）")
     args = parser.parse_args()
 
     with open(args.input, "r", encoding="utf-8") as f:
         dataset = json.load(f)
+    if not args.include_fast_changing:
+        before = len(dataset)
+        dataset = [d for d in dataset if d.get("freshness") != "fast-changing"]
+        print(f"已过滤 fast-changing（{before - len(dataset)} 道），剩余 {len(dataset)} 道（never/slow-changing）。")
+
     if args.limit:
         dataset = dataset[:args.limit]
+        print(f"取前 {args.limit} 道题。")
 
     print(f"\n{'='*60}")
     print(f"Evabot Benchmark  |  模型: {MODEL}  |  共 {len(dataset)} 道题")

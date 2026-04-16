@@ -146,9 +146,11 @@ def load_sealqa_dataset(limit: Optional[int] = None) -> list:
 
 def main():
     parser = argparse.ArgumentParser(description="为 SealQA 数据集抓取网页内容")
-    parser.add_argument("--limit", type=int, default=None, help="仅处理前 N 道题（默认全部 111 道）")
+    parser.add_argument("--limit", type=int, default=None, help="仅处理前 N 道题（默认全部）")
     parser.add_argument("--output", type=str, default=str(OUTPUT_PATH), help="输出 JSON 文件路径")
     parser.add_argument("--delay", type=float, default=0.5, help="每道题之间的延迟（秒）")
+    parser.add_argument("--include-fast-changing", action="store_true",
+                        help="是否包含 fast-changing 题目（默认跳过）")
     args = parser.parse_args()
 
     output_path = Path(args.output)
@@ -162,7 +164,18 @@ def main():
             existing = {str(item["id"]): item for item in data}
         print(f"发现已有缓存 {len(existing)} 条，将跳过已处理的题目。")
 
-    questions = load_sealqa_dataset(limit=args.limit)
+    questions = load_sealqa_dataset()  # 先加载全量，再过滤
+
+    # 默认过滤掉 fast-changing 题目（先过滤，再 limit）
+    if not args.include_fast_changing:
+        before = len(questions)
+        questions = [q for q in questions if q.get("freshness") != "fast-changing"]
+        print(f"已过滤 fast-changing 题目（{before - len(questions)} 道），剩余 {len(questions)} 道。")
+
+    if args.limit:
+        questions = questions[:args.limit]
+        print(f"取前 {args.limit} 道题。")
+
     results = list(existing.values())
     processed_ids = set(existing.keys())
 
