@@ -2,55 +2,55 @@
   "model": "deepseek-chat",
   "architecture": "Butler→Solver(autonomous)→Worker(on-demand)",
   "total_questions": 5,
-  "correct": 1,
-  "accuracy_pct": 20.0,
-  "avg_latency_s": 54.37,
-  "avg_worker_calls": 2.4,
+  "correct": 2,
+  "accuracy_pct": 40.0,
+  "avg_latency_s": 63.62,
+  "avg_worker_calls": 3.2,
   "results": [
     {
-      "id": 0,
-      "question": "Who holds the all-time record at the Grammys for the most wins in the album of the year category?",
-      "ground_truth": "Serban Ghenea",
-      "predicted": "Taylor Swift",
+      "id": 35,
+      "question": "Which three North American countries will host the 2026 FIFA's Women World Cup, the first to be co-hosted by three nations and the first North American World Cup since 1994?",
+      "ground_truth": "There won't be a FIFA's Women World Cup in 2026.",
+      "predicted": "Canada, Mexico, United States",
       "correct": false,
-      "latency_s": 21.6,
-      "worker_calls": 1
-    },
-    {
-      "id": 1,
-      "question": "How many NBA players have scored 60 or more points in a regular season game since 2023?",
-      "ground_truth": "12 players",
-      "predicted": "5",
-      "correct": false,
-      "latency_s": 79.51,
-      "worker_calls": 3
-    },
-    {
-      "id": 2,
-      "question": "What is the most recent film to join the top 10 highest-grossing films of all time?",
-      "ground_truth": "Zootopia 2",
-      "predicted": "Avatar: The Way of Water",
-      "correct": false,
-      "latency_s": 45.88,
-      "worker_calls": 2
-    },
-    {
-      "id": 3,
-      "question": "What is the current age of the last American experimental physicist to win the Nobel Prize in Physics?",
-      "ground_truth": "84 years old",
-      "predicted": "83",
-      "correct": false,
-      "latency_s": 110.69,
+      "latency_s": 77.68,
       "worker_calls": 5
     },
     {
-      "id": 4,
-      "question": "How many airlines are members of IATA, the organization that supports airline activity and helps formulate industry policy and standards?",
-      "ground_truth": "370",
-      "predicted": "370",
+      "id": 36,
+      "question": "Who is the only female artist to have topped Spotify's list of most-streamed artists in three consecutive years (2020–2022)?",
+      "ground_truth": "No one",
+      "predicted": "No female artist achieved this",
+      "correct": false,
+      "latency_s": 62.66,
+      "worker_calls": 3
+    },
+    {
+      "id": 37,
+      "question": "Which tropical rainforest represents a quarter of the total area of remaining tropical forests on Earth and comprises one of the largest and most biodiverse tracts of tropical rainforest in the world?",
+      "ground_truth": "Congolian rainforests",
+      "predicted": "Congolian rainforests",
       "correct": true,
-      "latency_s": 14.18,
-      "worker_calls": 1
+      "latency_s": 41.49,
+      "worker_calls": 2
+    },
+    {
+      "id": 38,
+      "question": "How many countries did both Donald Trump (during his first term) and Joe Biden visit during their presidencies, including the West Bank?",
+      "ground_truth": "18",
+      "predicted": "17",
+      "correct": false,
+      "latency_s": 101.5,
+      "worker_calls": 4
+    },
+    {
+      "id": 39,
+      "question": "What is the name of the in-place, stable comparison sorting algorithm with a worst-case time complexity of O(n log n) and a best-case time complexity of O(n)?",
+      "ground_truth": "Block sort",
+      "predicted": "Block sort",
+      "correct": true,
+      "latency_s": 34.790000000000006,
+      "worker_calls": 2
     }
   ]
 }

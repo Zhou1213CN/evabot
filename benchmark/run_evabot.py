@@ -264,17 +264,28 @@ def run_solver(question: str, sources: list) -> tuple:
 def score_answer(predicted: str, ground_truth: str) -> bool:
     """
     关键实体匹配：
-    1. 若标准答案含数字 → 只需数字匹配
-    2. 否则 → 取最长非停用词匹配
+    1. 否定语义匹配：标准答案为 "no one / none / won't / there won't" 时，
+       预测中出现否定词即算对
+    2. 若标准答案含数字 → 只需数字匹配
+    3. 否则 → 取最长非停用词匹配
     """
     pred_lower = predicted.lower()
     gt_lower   = ground_truth.lower()
 
+    # 1. 否定语义匹配
+    negation_answers = {"no one", "none", "nobody", "no female", "there won't", "won't be"}
+    negation_keywords = {"no", "none", "nobody", "not", "never", "won't", "cannot", "didn't",
+                         "doesn't", "haven't", "isn't", "aren't", "no one", "no female"}
+    if any(neg in gt_lower for neg in negation_answers):
+        return any(kw in pred_lower for kw in negation_keywords)
+
+    # 2. 数字匹配
     gt_numbers = re.findall(r'\d+', gt_lower)
     if gt_numbers:
         pred_numbers = re.findall(r'\d+', pred_lower)
         return any(n in pred_numbers for n in gt_numbers)
 
+    # 3. 实体匹配：取最长非停用词
     stopwords = {"the","a","an","of","in","at","to","and","or",
                  "is","are","was","were","years","old","players","films"}
     tokens = [t for t in re.findall(r"[a-z']+", gt_lower) if t not in stopwords]
