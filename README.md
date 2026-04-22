@@ -42,7 +42,7 @@ You'll never lose touch with the people who matter because you were too busy.
 
 ### 🔄 One Conversation, All the Way Through
 
-You only need to chat with one **Butler**. No new sessions, no worrying about context windows. A three-layer architecture physically separates task execution from your conversation — the deeper a task goes, the less it affects your chat history. evabot gets smarter the more you use it, not slower.
+You only need to chat with one **Butler**. No new sessions, no worrying about context windows. A three-layer architecture physically separates task execution from your conversation. evabot gets smarter the more you use it, not slower.
 
 
 ### 🧬 Self-Evolution — Three Levels of Growth
@@ -169,7 +169,8 @@ run.py                      # System entry point
 - [x] Core architecture
 - [x] Frontend UI
 - [x] channel support
-- [ ] Scheduled tasks
+- [x] Scheduled tasks
+- [ ] ASR and Speaker Recognition
 - [ ] Daily information recording/processing
 - [ ] Computer operation
 - [ ] Multimodal support

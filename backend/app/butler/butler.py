@@ -14,7 +14,7 @@ from backend.core.utils import load_prompt, extract_json, utc_now
 
 logger = get_logger("butler")
 
-need_tools = ['communicate_with_downstream','add_schedule']
+need_tools = ['communicate_with_downstream','ManageScheduleTool']
 
 class ButlerService:
     def __init__(self, gateway: Gateway):
@@ -220,6 +220,8 @@ class ButlerService:
                         if tool_name == 'edit_file':
                             args_dict["path"] = os.path.join(os.path.dirname(__file__),'soul.md')
                         result = execute_tool(tool_name, args_dict)
+                        if tool_name == 'edit_file':
+                            self._system_prompt = load_prompt(os.path.dirname(__file__), 'soul.md', with_path=False)
                         tool_message = Message(
                             sender=Component.BUTLER,
                             sender_id=ctx.owner_id,

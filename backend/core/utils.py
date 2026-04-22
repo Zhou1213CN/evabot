@@ -42,6 +42,7 @@ def gen_id(prefix: str = "") -> str:
 def utc_now() -> datetime:
     # """
     # 统一使用 UTC 时间（timezone-aware datetime），避免组件之间时区混乱。
+    # 统一用系统时间，大模型不知道用户时区很麻烦，放弃UTC
     # """
     return datetime.now()
 

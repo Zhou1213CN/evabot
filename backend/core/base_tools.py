@@ -365,14 +365,19 @@ class EditFileTool(BaseTool):
 
 class GetAllSkillsTool(BaseTool):
     name = "get_all_skills"
-    description = "获取系统中所有 skills 的树状结构，包含技能名称、所在目录路径和功能描述。"
+    description = "获取系统中 skills 的树状结构。可以获取全局所有 skill，或指定某个 skill 获取其下的所有子 skill。"
     parameters = {
         "type": "object",
-        "properties": {},
-        "required": []
+        "properties": {
+            "target_skill": {
+                "type": "string",
+                "description": "要查询的 skill 名称。输入 'all' 获取全局所有 skill，输入具体的 skill 名称则获取该节点及其下的所有子节点。"
+            }
+        },
+        "required": ["target_skill"]
     }
 
-    def execute(self, **kwargs: Any) -> str:
+    def execute(self, target_skill: str = "all", **kwargs: Any) -> str:
         try:
             # 局部导入，避免顶层导入可能导致的循环引用
             from backend.power.power import PowerManager
@@ -393,7 +398,17 @@ class GetAllSkillsTool(BaseTool):
                         lines.extend(build_tree(skill.sub_skills, indent + 1))
                 return lines
             
-            tree_lines = build_tree(pm.skills)
+            if target_skill.lower() == "all":
+                tree_lines = build_tree(pm.skills)
+            else:
+                # 复用 PowerManager 现有的深度优先查找方法
+                target = pm._find_skill(target_skill)
+                if not target:
+                    return f"未找到指定的 skill: {target_skill}"
+                
+                # 以找到的节点为根，构建其专属的子树
+                tree_lines = build_tree({target.name: target})
+                
             if not tree_lines:
                 return "暂无可用的 skills。"
             return "\n".join(tree_lines)
@@ -401,24 +416,47 @@ class GetAllSkillsTool(BaseTool):
             return f"获取 skills 失败: {str(e)}"
         
 
-class AddScheduleTool(BaseTool):
-    name = "add_schedule"
-    description = "Create a scheduled task. Supports sending direct messages to user or starting a new task at a specific date or on a cron schedule."
+# backend/core/base_tools.py
+# (保留前面的引用和其他 Tool 的代码...)
+
+class ManageScheduleTool(BaseTool):
+    name = "manage_schedule"
+    description = "Manage scheduled tasks. Supports adding, querying, and deleting schedules."
     parameters = {
         "type": "object",
         "properties": {
-            "trigger_type": {"type": "string", "enum": ["date", "cron"], "description": "Type of schedule trigger."},
+            "operation": {
+                "type": "string", 
+                "enum": ["add", "query", "delete"], 
+                "description": "The operation to perform. 'add' to create, 'query' to list all, 'delete' to remove one."
+            },
+            "task_id": {
+                "type": "string", 
+                "description": "The ID of the task. Strictly required for 'delete' operation."
+            },
+            "trigger_type": {
+                "type": "string", 
+                "enum": ["date", "cron"], 
+                "description": "Type of schedule trigger. Required for 'add'."
+            },
             "trigger_args": {
                 "type": "object", 
-                "description": "Arguments for the trigger. For 'date', provide 'run_date' (e.g., '2026-04-07 15:30:00'). For 'cron', provide 'cron_expression' (standard 5-part cron string, e.g., '0 8 * * *')."
+                "description": "Arguments for the trigger. Required for 'add'. For 'date', provide {'run_date': 'YYYY-MM-DD HH:MM:SS'}. For 'cron', provide {'cron_expression': '0 8 * * *'}."
             },
-            "action_type": {"type": "string", "enum": ["send_message", "create_task"], "description": "Type of action to execute."},
-            "content": {"type": "string", "description": "The exact message to send to the user, or the exact task description to be executed by the solver."}
+            "action_type": {
+                "type": "string", 
+                "enum": ["send_message", "create_task"], 
+                "description": "Type of action. Required for 'add'."
+            },
+            "content": {
+                "type": "string", 
+                "description": "The exact message to send or task description to execute. Required for 'add'."
+            }
         },
-        "required": ["trigger_type", "trigger_args", "action_type", "content"]
+        "required": ["operation"]
     }
 
-    def execute(self, trigger_type: str, trigger_args: dict, action_type: str, content: str, **kwargs: Any) -> str:
+    def execute(self, operation: str, task_id: str = None, trigger_type: str = None, trigger_args: dict = None, action_type: str = None, content: str = None, **kwargs: Any) -> str:
         import json
         import os
         from datetime import datetime
@@ -429,6 +467,7 @@ class AddScheduleTool(BaseTool):
             os.makedirs(base_dir, exist_ok=True)
             pending_file = os.path.join(base_dir, 'pending_tasks.json')
             
+            # 加载当前所有日程
             tasks = []
             if os.path.exists(pending_file):
                 with open(pending_file, 'r', encoding='utf-8') as f:
@@ -436,27 +475,58 @@ class AddScheduleTool(BaseTool):
                         tasks = json.load(f)
                     except json.JSONDecodeError:
                         tasks = []
-                    
-            task_id = gen_id("sch_")
-            new_task = {
-                "task_id": task_id,
-                "created_at": datetime.now().isoformat(),
-                "trigger_type": trigger_type,
-                "trigger_args": trigger_args,
-                "action_type": action_type,
-                "content": content
-            }
-            
-            tasks.append(new_task)
-            
-            with open(pending_file, 'w', encoding='utf-8') as f:
-                json.dump(tasks, f, ensure_ascii=False, indent=2)
-                
-            return f"Scheduled task created successfully. Task ID: {task_id}. Trigger: {trigger_type} with parameters {trigger_args}. Action: {action_type}."
-        except Exception as e:
-            return f"Failed to create schedule: {str(e)}"
 
-# 注册所有支持的工具
+            # 执行具体路由逻辑
+            if operation == "query":
+                if not tasks:
+                    return "当前没有任何计划中的日程任务。"
+                
+                res = "当前的日程任务列表如下:\n"
+                for t in tasks:
+                    res += f"- Task ID: {t.get('task_id')} | Trigger: {t.get('trigger_type')} {t.get('trigger_args')} | Action: {t.get('action_type')} | Content: {t.get('content')}\n"
+                return res
+
+            elif operation == "delete":
+                if not task_id:
+                    return "Error: 执行 'delete' 操作必须提供 'task_id'。"
+                
+                initial_len = len(tasks)
+                tasks = [t for t in tasks if t.get('task_id') != task_id]
+                
+                if len(tasks) == initial_len:
+                    return f"Error: 找不到 ID 为 '{task_id}' 的日程任务。"
+                
+                with open(pending_file, 'w', encoding='utf-8') as f:
+                    json.dump(tasks, f, ensure_ascii=False, indent=2)
+                return f"成功删除日程任务: {task_id}。"
+
+            elif operation == "add":
+                if not all([trigger_type, trigger_args, action_type, content]):
+                    return "Error: 执行 'add' 操作必须提供 'trigger_type', 'trigger_args', 'action_type' 和 'content'。"
+                
+                new_task_id = gen_id("sch_")
+                new_task = {
+                    "task_id": new_task_id,
+                    "created_at": datetime.now().isoformat(),
+                    "trigger_type": trigger_type,
+                    "trigger_args": trigger_args,
+                    "action_type": action_type,
+                    "content": content
+                }
+                
+                tasks.append(new_task)
+                with open(pending_file, 'w', encoding='utf-8') as f:
+                    json.dump(tasks, f, ensure_ascii=False, indent=2)
+                    
+                return f"Scheduled task created successfully. Task ID: {new_task_id}. Trigger: {trigger_type} with args {trigger_args}."
+
+            else:
+                return f"Error: 不支持的操作类型 '{operation}'。"
+                
+        except Exception as e:
+            return f"Schedule tool execution failed: {str(e)}"
+
+# 修改底部的 REGISTERED_TOOLS 列表
 REGISTERED_TOOLS = [
     ListDirTool(),
     ExecCommandTool(),
@@ -464,7 +534,7 @@ REGISTERED_TOOLS = [
     WriteFileTool(),
     EditFileTool(),
     GetAllSkillsTool(),
-    AddScheduleTool()
+    ManageScheduleTool()  # 替换这里
 ]
 
 
