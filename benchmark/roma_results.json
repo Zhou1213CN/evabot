@@ -4,11 +4,12 @@
   "total_questions": 5,
   "correct": 3,
   "accuracy_pct": 60.0,
-  "avg_latency_s": 38.77,
+  "avg_latency_s": 9.7,
+  "avg_llm_calls": 1.0,
   "avg_input_tokens": 17983.0,
-  "avg_output_tokens": 1078.0,
-  "avg_total_tokens": 19061.0,
-  "grand_total_tokens": 95306,
+  "avg_output_tokens": 469.0,
+  "avg_total_tokens": 18452.0,
+  "grand_total_tokens": 92261,
   "results": [
     {
       "id": 35,
@@ -16,10 +17,11 @@
       "ground_truth": "There won't be a FIFA's Women World Cup in 2026.",
       "predicted": "Canada, Mexico, United States",
       "correct": false,
-      "latency_s": 22.11,
+      "latency_s": 8.7,
+      "llm_calls": 1,
       "input_tokens": 22587,
-      "output_tokens": 517,
-      "total_tokens": 23104
+      "output_tokens": 244,
+      "total_tokens": 22831
     },
     {
       "id": 36,
@@ -27,10 +29,11 @@
       "ground_truth": "No one",
       "predicted": "None",
       "correct": true,
-      "latency_s": 27.37,
+      "latency_s": 6.82,
+      "llm_calls": 1,
       "input_tokens": 10875,
-      "output_tokens": 735,
-      "total_tokens": 11610
+      "output_tokens": 242,
+      "total_tokens": 11117
     },
     {
       "id": 37,
@@ -38,10 +41,11 @@
       "ground_truth": "Congolian rainforests",
       "predicted": "Congolian rainforests",
       "correct": true,
-      "latency_s": 19.83,
+      "latency_s": 7.65,
+      "llm_calls": 1,
       "input_tokens": 21301,
-      "output_tokens": 511,
-      "total_tokens": 21812
+      "output_tokens": 262,
+      "total_tokens": 21563
     },
     {
       "id": 38,
@@ -49,10 +53,11 @@
       "ground_truth": "18",
       "predicted": "19",
       "correct": false,
-      "latency_s": 115.94,
+      "latency_s": 21.06,
+      "llm_calls": 1,
       "input_tokens": 17869,
-      "output_tokens": 3442,
-      "total_tokens": 21311
+      "output_tokens": 1465,
+      "total_tokens": 19334
     },
     {
       "id": 39,
@@ -60,10 +65,11 @@
       "ground_truth": "Block sort",
       "predicted": "Block sort",
       "correct": true,
-      "latency_s": 8.59,
+      "latency_s": 4.26,
+      "llm_calls": 1,
       "input_tokens": 17285,
-      "output_tokens": 184,
-      "total_tokens": 17469
+      "output_tokens": 131,
+      "total_tokens": 17416
     }
   ]
 }

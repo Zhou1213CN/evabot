@@ -185,13 +185,16 @@ def main():
             out_tok += usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
         total_tokens = in_tok + out_tok
 
+        # DSPy CoT = 1 LLM call per question (reasoning + answer in one shot)
+        llm_calls = len(lm.history) - history_before
+
         is_correct = score_answer(predicted, answer)
         if is_correct:
             correct += 1
 
         status = "✅" if is_correct else "❌"
         print(f"  预测答案: {predicted[:120]}")
-        print(f"  {status}  耗时: {latency}s  Token: {in_tok}↑ {out_tok}↓ (共{total_tokens})\n")
+        print(f"  {status}  耗时: {latency}s  LLM调用: {llm_calls}次  Token: {in_tok}↑ {out_tok}↓ (共{total_tokens})\n")
 
         results.append({
             "id": item["id"],
@@ -200,6 +203,7 @@ def main():
             "predicted": predicted,
             "correct": is_correct,
             "latency_s": latency,
+            "llm_calls": llm_calls,
             "input_tokens": in_tok,
             "output_tokens": out_tok,
             "total_tokens": total_tokens,
@@ -213,6 +217,7 @@ def main():
     avg_out_tok = round(sum(r["output_tokens"] for r in results) / total, 0) if total else 0
     avg_tok     = round(sum(r["total_tokens"]  for r in results) / total, 0) if total else 0
     total_tok   = sum(r["total_tokens"] for r in results)
+    avg_llm     = round(sum(r["llm_calls"] for r in results) / total, 1) if total else 0
 
     summary = {
         "model": "deepseek-chat",
@@ -221,6 +226,7 @@ def main():
         "correct": correct,
         "accuracy_pct": accuracy,
         "avg_latency_s": avg_lat,
+        "avg_llm_calls": avg_llm,
         "avg_input_tokens": avg_in_tok,
         "avg_output_tokens": avg_out_tok,
         "avg_total_tokens": avg_tok,
@@ -239,6 +245,7 @@ def main():
     print(f"  正确数            : {correct}")
     print(f"  准确率            : {accuracy}%")
     print(f"  平均耗时          : {avg_lat}s / 题")
+    print(f"  平均 LLM 调用     : {avg_llm}次 / 题")
     print(f"  平均 Token 消耗   : {avg_tok} / 题  (输入{avg_in_tok} + 输出{avg_out_tok})")
     print(f"  总 Token 消耗     : {total_tok}")
     print(f"  结果已保存        : {args.output}")

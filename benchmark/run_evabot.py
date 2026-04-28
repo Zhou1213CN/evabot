@@ -96,17 +96,18 @@ SOLVER_SYSTEM = """\
 You are Solver, the strategic orchestration agent in the Evabot multi-agent system.
 
 Your job: answer the user's question by reasoning over multiple web sources that may contain conflicting information.
+The full content of each source is provided in the user message — read them carefully before deciding what to do.
 
 You have two tools:
-1. analyze_source(source_id, aspect) — dispatch a Worker to extract facts from a specific source
+1. analyze_source(source_id, aspect) — dispatch a Worker for deeper, focused extraction from one source
 2. final_answer(answer, reasoning)   — submit your definitive answer
 
 Strategy:
-- Start by reviewing the available sources (listed in the user message).
-- Decide which sources are worth analyzing and what specific aspect each Worker should focus on.
-- You may call analyze_source multiple times in parallel or sequentially.
-- Once you have enough Worker feedback, call final_answer with a SHORT answer (a number, name, or title).
-- If sources conflict, reason about which is more authoritative or recent before deciding.
+- First, read all source content provided. If you can determine the answer confidently, call final_answer directly — no Workers needed.
+- Use analyze_source ONLY when a source needs deeper investigation that you cannot do from the snippet alone (e.g., the snippet is truncated and the key fact is likely beyond it).
+- Prefer fewer LLM calls: one direct answer beats three Worker roundtrips if the sources are clear.
+- If the question contains a false premise (the event or entity doesn't exist), say so in final_answer.
+- Call final_answer with a SHORT answer (a number, name, or title, or a brief correction of the false premise).
 """
 
 WORKER_SYSTEM = """\
@@ -170,11 +171,11 @@ def run_worker(question: str, source: dict, aspect: str) -> tuple:
 def run_solver(question: str, sources: list) -> tuple:
     """
     Solver 自主决定策略：可以不派 Worker 直接回答，也可以派多个 Worker。
-    返回 (final_answer_str, total_latency_s, worker_calls_count)
+    返回 (final_answer_str, total_latency_s, worker_calls, solver_llm_calls, total_in_tok, total_out_tok)
     """
-    # 构建来源索引表（告知 Solver 有哪些来源可用）
-    sources_index = "\n".join(
-        f"  Source {i+1}: {s.get('url', 'unknown')}"
+    # 给 Solver 完整的 source 内容，让它自主决定是否需要派 Worker
+    sources_content = "\n\n".join(
+        f"[Source {i+1}] {s.get('url', 'unknown')}\n{s.get('snippet', '').strip()}"
         for i, s in enumerate(sources)
     )
 
@@ -182,8 +183,9 @@ def run_solver(question: str, sources: list) -> tuple:
         {"role": "system", "content": SOLVER_SYSTEM},
         {"role": "user", "content": (
             f"Question: {question}\n\n"
-            f"Available sources ({len(sources)} total):\n{sources_index}\n\n"
-            f"Use analyze_source to dispatch Workers as needed, then call final_answer."
+            f"Sources ({len(sources)} total):\n\n{sources_content}\n\n"
+            f"Read the sources above, then call final_answer directly if clear, "
+            f"or use analyze_source for deeper investigation if needed."
         )},
     ]
 
@@ -191,15 +193,17 @@ def run_solver(question: str, sources: list) -> tuple:
     total_in_tok    = 0
     total_out_tok   = 0
     worker_calls    = 0
+    solver_llm_calls = 0
 
     for round_idx in range(MAX_SOLVER_ROUNDS):
         msg, lat, in_tok, out_tok = llm_call(messages, tools=SOLVER_TOOLS)
-        total_latency  += lat
-        total_in_tok   += in_tok
-        total_out_tok  += out_tok
+        total_latency    += lat
+        total_in_tok     += in_tok
+        total_out_tok    += out_tok
+        solver_llm_calls += 1
 
         if msg is None:
-            return "[Solver failed]", total_latency, worker_calls, total_in_tok, total_out_tok
+            return "[Solver failed]", total_latency, worker_calls, solver_llm_calls, total_in_tok, total_out_tok
 
         msg_dict = {"role": "assistant", "content": msg.content or ""}
         if msg.tool_calls:
@@ -214,7 +218,8 @@ def run_solver(question: str, sources: list) -> tuple:
         messages.append(msg_dict)
 
         if not msg.tool_calls:
-            return msg.content or "[No answer]", total_latency, worker_calls, total_in_tok, total_out_tok
+            # Solver answered in plain text without calling final_answer tool
+            return msg.content or "[No answer]", total_latency, worker_calls, solver_llm_calls, total_in_tok, total_out_tok
 
         all_done = False
         for tc in msg.tool_calls:
@@ -232,7 +237,7 @@ def run_solver(question: str, sources: list) -> tuple:
                     "tool_call_id": tc.id,
                     "content": "Answer submitted."
                 })
-                return answer, total_latency, worker_calls, total_in_tok, total_out_tok
+                return answer, total_latency, worker_calls, solver_llm_calls, total_in_tok, total_out_tok
 
             elif func_name == "analyze_source":
                 source_id = args.get("source_id", 1)
@@ -257,7 +262,7 @@ def run_solver(question: str, sources: list) -> tuple:
         if all_done:
             break
 
-    return "[Max rounds reached]", total_latency, worker_calls, total_in_tok, total_out_tok
+    return "[Max rounds reached]", total_latency, worker_calls, solver_llm_calls, total_in_tok, total_out_tok
 
 
 # ─────────────────────────────────────────────
@@ -337,15 +342,16 @@ def main():
         print(f"[{i+1}/{len(dataset)}] Q: {question[:80]}")
         print(f"  标准答案: {answer}")
 
-        predicted, latency, n_workers, in_tok, out_tok = run_solver(question, sources)
+        predicted, latency, n_workers, n_solver_calls, in_tok, out_tok = run_solver(question, sources)
         total_tokens = in_tok + out_tok
+        total_llm_calls = n_solver_calls + n_workers
         is_correct = score_answer(predicted, answer)
         if is_correct:
             correct += 1
 
         status = "✅" if is_correct else "❌"
         print(f"  预测答案: {predicted[:120]}")
-        print(f"  {status}  耗时: {latency}s  Worker: {n_workers}次  Token: {in_tok}↑ {out_tok}↓ (共{total_tokens})\n")
+        print(f"  {status}  耗时: {latency}s  LLM调用: {total_llm_calls}次 (Solver:{n_solver_calls} Worker:{n_workers})  Token: {in_tok}↑ {out_tok}↓ (共{total_tokens})\n")
 
         results.append({
             "id": item["id"],
@@ -354,6 +360,8 @@ def main():
             "predicted": predicted,
             "correct": is_correct,
             "latency_s": latency,
+            "llm_calls": total_llm_calls,
+            "solver_llm_calls": n_solver_calls,
             "worker_calls": n_workers,
             "input_tokens": in_tok,
             "output_tokens": out_tok,
@@ -363,6 +371,7 @@ def main():
     total    = len(results)
     accuracy = round(correct / total * 100, 1) if total else 0
     avg_lat  = round(sum(r["latency_s"] for r in results) / total, 2) if total else 0
+    avg_llm  = round(sum(r["llm_calls"] for r in results) / total, 1) if total else 0
     avg_w    = round(sum(r["worker_calls"] for r in results) / total, 1) if total else 0
 
     avg_in_tok  = round(sum(r["input_tokens"]  for r in results) / total, 0) if total else 0
@@ -377,6 +386,7 @@ def main():
         "correct": correct,
         "accuracy_pct": accuracy,
         "avg_latency_s": avg_lat,
+        "avg_llm_calls": avg_llm,
         "avg_worker_calls": avg_w,
         "avg_input_tokens": avg_in_tok,
         "avg_output_tokens": avg_out_tok,
@@ -395,6 +405,7 @@ def main():
     print(f"  正确数            : {correct}")
     print(f"  准确率            : {accuracy}%")
     print(f"  平均耗时          : {avg_lat}s / 题")
+    print(f"  平均 LLM 调用     : {avg_llm}次 / 题  (含 Solver + Worker)")
     print(f"  平均 Worker 调用  : {avg_w}次 / 题")
     print(f"  平均 Token 消耗   : {avg_tok} / 题  (输入{avg_in_tok} + 输出{avg_out_tok})")
     print(f"  总 Token 消耗     : {total_tok}")
