@@ -1,0 +1,414 @@
+"""
+benchmark/run_evabot.py
+
+阶段二：Evabot 基准测试运行器（忠实架构版）
+
+真实 Evabot 架构：
+  Butler  →  Solver（拿到问题后自主决策）
+                ├── 判断是否需要派 Worker
+                ├── 决定派哪些 Worker、每个做什么
+                └── Worker 汇报后综合答案
+
+本脚本用 tool_call 模拟 Solver 的自主派发：
+  - Solver 可调用 analyze_source(source_id, aspect) 派 Worker 分析指定来源
+  - Solver 可调用 final_answer(answer) 直接给出答案
+  - Worker 执行 Solver 指定的任务并返回结果
+  - Solver 基于所有 Worker 反馈综合最终答案
+
+用法：
+    python benchmark/run_evabot.py --limit 5
+    python benchmark/run_evabot.py          # 全部 111 题
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+from typing import Optional
+
+from openai import OpenAI
+
+DEEPSEEK_KEY = os.environ.get("deepseek_key", "sk-b6cd43bbc301481fa51120a56e53a39d")
+BASE_URL     = "https://api.deepseek.com"
+MODEL        = "deepseek-chat"
+MAX_SOLVER_ROUNDS = 8   # Solver 最多与 Worker 交互几轮
+
+INPUT_PATH   = Path(__file__).parent / "cached_sources.json"
+OUTPUT_PATH  = Path(__file__).parent / "evabot_results.json"
+
+client = OpenAI(base_url=BASE_URL, api_key=DEEPSEEK_KEY, timeout=90.0)
+
+# ─────────────────────────────────────────────
+# Solver 的 tool schema（它能调用的两个工具）
+# ─────────────────────────────────────────────
+SOLVER_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_source",
+            "description": (
+                "Dispatch a Worker to carefully analyze one specific web source. "
+                "The Worker will read the source and extract facts relevant to your specified aspect."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source_id": {
+                        "type": "integer",
+                        "description": "1-based index of the source to analyze"
+                    },
+                    "aspect": {
+                        "type": "string",
+                        "description": "Specific question or aspect you want the Worker to focus on"
+                    }
+                },
+                "required": ["source_id", "aspect"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "final_answer",
+            "description": "Submit your definitive answer. Call this once you have enough information.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "answer": {
+                        "type": "string",
+                        "description": "Short, definitive answer (name / number / title)"
+                    },
+                    "reasoning": {
+                        "type": "string",
+                        "description": "Brief explanation of why this is correct despite conflicting sources"
+                    }
+                },
+                "required": ["answer"]
+            }
+        }
+    }
+]
+
+SOLVER_SYSTEM = """\
+You are Solver, the strategic orchestration agent in the Evabot multi-agent system.
+
+Your job: answer the user's question by reasoning over multiple web sources that may contain conflicting information.
+
+You have two tools:
+1. analyze_source(source_id, aspect) — dispatch a Worker to extract facts from a specific source
+2. final_answer(answer, reasoning)   — submit your definitive answer
+
+Strategy:
+- Start by reviewing the available sources (listed in the user message).
+- Decide which sources are worth analyzing and what specific aspect each Worker should focus on.
+- You may call analyze_source multiple times in parallel or sequentially.
+- Once you have enough Worker feedback, call final_answer with a SHORT answer (a number, name, or title).
+- If sources conflict, reason about which is more authoritative or recent before deciding.
+"""
+
+WORKER_SYSTEM = """\
+You are a Worker in the Evabot system. Solver has dispatched you to analyze one web source.
+Extract every fact that is relevant to the given aspect/question.
+Be precise and verbatim. If the source is irrelevant, say so.
+"""
+
+# ─────────────────────────────────────────────
+# LLM 调用
+# ─────────────────────────────────────────────
+
+def llm_call(messages: list, tools=None, retries: int = 3) -> tuple:
+    """返回 (response_message, latency_s, input_tokens, output_tokens)"""
+    for attempt in range(retries):
+        try:
+            t0 = time.time()
+            kwargs = dict(model=MODEL, messages=messages, temperature=0.1)
+            if tools:
+                kwargs["tools"] = tools
+            resp = client.chat.completions.create(**kwargs)
+            latency = round(time.time() - t0, 2)
+            msg = resp.choices[0].message
+            usage = resp.usage
+            return msg, latency, usage.prompt_tokens, usage.completion_tokens
+        except Exception as e:
+            print(f"    [重试 {attempt+1}/{retries}] {type(e).__name__}: {e}")
+            if attempt < retries - 1:
+                time.sleep(3 * (attempt + 1))
+    return None, 0.0, 0, 0
+
+
+# ─────────────────────────────────────────────
+# Worker 执行（由 Solver 的 tool call 触发）
+# ─────────────────────────────────────────────
+
+def run_worker(question: str, source: dict, aspect: str) -> tuple:
+    """Worker 分析指定来源，返回 (facts_text, latency_s, in_tokens, out_tokens)"""
+    snippet = source.get("snippet", "").strip()
+    url     = source.get("url", "unknown")
+    if not snippet:
+        return f"Source unavailable (failed to fetch: {url}). Do not retry this source.", 0.0, 0, 0
+
+    messages = [
+        {"role": "system", "content": WORKER_SYSTEM},
+        {"role": "user", "content": (
+            f"Original question: {question}\n"
+            f"Aspect to focus on: {aspect}\n\n"
+            f"Source URL: {url}\n\n"
+            f"{snippet}"
+        )},
+    ]
+    msg, lat, in_tok, out_tok = llm_call(messages)
+    return (msg.content or "[No output]") if msg else "[Worker failed]", lat, in_tok, out_tok
+
+
+# ─────────────────────────────────────────────
+# Solver 主循环（自主决策 + 派发 Worker）
+# ─────────────────────────────────────────────
+
+def run_solver(question: str, sources: list) -> tuple:
+    """
+    Solver 自主决定策略：可以不派 Worker 直接回答，也可以派多个 Worker。
+    返回 (final_answer_str, total_latency_s, worker_calls, solver_llm_calls, total_in_tok, total_out_tok)
+    """
+    # Solver 只看 URL 列表，由它决定派哪些 Worker 去读内容
+    sources_index = "\n".join(
+        f"  Source {i+1}: {s.get('url', 'unknown')}"
+        for i, s in enumerate(sources)
+    )
+
+    messages = [
+        {"role": "system", "content": SOLVER_SYSTEM},
+        {"role": "user", "content": (
+            f"Question: {question}\n\n"
+            f"Available sources ({len(sources)} total):\n{sources_index}\n\n"
+            f"Use analyze_source to dispatch Workers as needed, then call final_answer."
+        )},
+    ]
+
+    total_latency   = 0.0
+    total_in_tok    = 0
+    total_out_tok   = 0
+    worker_calls    = 0
+    solver_llm_calls = 0
+
+    for round_idx in range(MAX_SOLVER_ROUNDS):
+        msg, lat, in_tok, out_tok = llm_call(messages, tools=SOLVER_TOOLS)
+        total_latency    += lat
+        total_in_tok     += in_tok
+        total_out_tok    += out_tok
+        solver_llm_calls += 1
+
+        if msg is None:
+            return "[Solver failed]", total_latency, worker_calls, solver_llm_calls, total_in_tok, total_out_tok
+
+        msg_dict = {"role": "assistant", "content": msg.content or ""}
+        if msg.tool_calls:
+            msg_dict["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments}
+                }
+                for tc in msg.tool_calls
+            ]
+        messages.append(msg_dict)
+
+        if not msg.tool_calls:
+            return msg.content or "[No answer]", total_latency, worker_calls, solver_llm_calls, total_in_tok, total_out_tok
+
+        all_done = False
+        for tc in msg.tool_calls:
+            func_name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments)
+            except Exception:
+                args = {}
+
+            if func_name == "final_answer":
+                all_done = True
+                answer = args.get("answer", "[No answer]")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": "Answer submitted."
+                })
+                return answer, total_latency, worker_calls, solver_llm_calls, total_in_tok, total_out_tok
+
+            elif func_name == "analyze_source":
+                source_id = args.get("source_id", 1)
+                aspect    = args.get("aspect", question)
+                src_idx   = source_id - 1
+                if 0 <= src_idx < len(sources):
+                    facts, w_lat, w_in, w_out = run_worker(question, sources[src_idx], aspect)
+                    total_latency += w_lat
+                    total_in_tok  += w_in
+                    total_out_tok += w_out
+                    worker_calls  += 1
+                    tool_result = facts
+                else:
+                    tool_result = f"Source {source_id} does not exist."
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": tool_result
+                })
+
+        if all_done:
+            break
+
+    return "[Max rounds reached]", total_latency, worker_calls, solver_llm_calls, total_in_tok, total_out_tok
+
+
+# ─────────────────────────────────────────────
+# 评分
+# ─────────────────────────────────────────────
+
+def score_answer(predicted: str, ground_truth: str) -> bool:
+    """
+    关键实体匹配：
+    1. 否定语义匹配：标准答案为 "no one / none / won't / there won't" 时，
+       预测中出现否定词即算对
+    2. 若标准答案含数字 → 只需数字匹配
+    3. 否则 → 取最长非停用词匹配
+    """
+    pred_lower = predicted.lower()
+    gt_lower   = ground_truth.lower()
+
+    # 1. 否定语义匹配
+    negation_answers = {"no one", "none", "nobody", "no female", "there won't", "won't be"}
+    negation_keywords = {"no", "none", "nobody", "not", "never", "won't", "cannot", "didn't",
+                         "doesn't", "haven't", "isn't", "aren't", "no one", "no female"}
+    if any(neg in gt_lower for neg in negation_answers):
+        return any(kw in pred_lower for kw in negation_keywords)
+
+    # 2. 数字匹配
+    gt_numbers = re.findall(r'\d+', gt_lower)
+    if gt_numbers:
+        pred_numbers = re.findall(r'\d+', pred_lower)
+        return any(n in pred_numbers for n in gt_numbers)
+
+    # 3. 实体匹配：取最长非停用词
+    stopwords = {"the","a","an","of","in","at","to","and","or",
+                 "is","are","was","were","years","old","players","films"}
+    tokens = [t for t in re.findall(r"[a-z']+", gt_lower) if t not in stopwords]
+    if not tokens:
+        return gt_lower in pred_lower
+    return max(tokens, key=len) in pred_lower
+
+
+# ─────────────────────────────────────────────
+# 主流程
+# ─────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit",  type=int, default=None)
+    parser.add_argument("--input",  type=str, default=str(INPUT_PATH))
+    parser.add_argument("--output", type=str, default=str(OUTPUT_PATH))
+    parser.add_argument("--include-fast-changing", action="store_true",
+                        help="包含 fast-changing 题目（默认跳过）")
+    args = parser.parse_args()
+
+    with open(args.input, "r", encoding="utf-8") as f:
+        dataset = json.load(f)
+    if not args.include_fast_changing:
+        before = len(dataset)
+        dataset = [d for d in dataset if d.get("freshness") != "fast-changing"]
+        print(f"已过滤 fast-changing（{before - len(dataset)} 道），剩余 {len(dataset)} 道（never/slow-changing）。")
+
+    if args.limit:
+        dataset = dataset[:args.limit]
+        print(f"取前 {args.limit} 道题。")
+
+    print(f"\n{'='*60}")
+    print(f"Evabot Benchmark  |  模型: {MODEL}  |  共 {len(dataset)} 道题")
+    print(f"架构: Butler → Solver（自主决策）→ Worker（按需派发）")
+    print(f"{'='*60}\n")
+
+    results = []
+    correct = 0
+
+    for i, item in enumerate(dataset):
+        question = item["question"]
+        answer   = item["answer"]
+        sources  = item["sources"]
+
+        print(f"[{i+1}/{len(dataset)}] Q: {question[:80]}")
+        print(f"  标准答案: {answer}")
+
+        predicted, latency, n_workers, n_solver_calls, in_tok, out_tok = run_solver(question, sources)
+        total_tokens = in_tok + out_tok
+        total_llm_calls = n_solver_calls + n_workers
+        is_correct = score_answer(predicted, answer)
+        if is_correct:
+            correct += 1
+
+        status = "✅" if is_correct else "❌"
+        print(f"  预测答案: {predicted[:120]}")
+        print(f"  {status}  耗时: {latency}s  LLM调用: {total_llm_calls}次 (Solver:{n_solver_calls} Worker:{n_workers})  Token: {in_tok}↑ {out_tok}↓ (共{total_tokens})\n")
+
+        results.append({
+            "id": item["id"],
+            "question": question,
+            "ground_truth": answer,
+            "predicted": predicted,
+            "correct": is_correct,
+            "latency_s": latency,
+            "llm_calls": total_llm_calls,
+            "solver_llm_calls": n_solver_calls,
+            "worker_calls": n_workers,
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
+            "total_tokens": total_tokens,
+        })
+
+    total    = len(results)
+    accuracy = round(correct / total * 100, 1) if total else 0
+    avg_lat  = round(sum(r["latency_s"] for r in results) / total, 2) if total else 0
+    avg_llm  = round(sum(r["llm_calls"] for r in results) / total, 1) if total else 0
+    avg_w    = round(sum(r["worker_calls"] for r in results) / total, 1) if total else 0
+
+    avg_in_tok  = round(sum(r["input_tokens"]  for r in results) / total, 0) if total else 0
+    avg_out_tok = round(sum(r["output_tokens"] for r in results) / total, 0) if total else 0
+    avg_tok     = round(sum(r["total_tokens"]  for r in results) / total, 0) if total else 0
+    total_tok   = sum(r["total_tokens"] for r in results)
+
+    summary = {
+        "model": MODEL,
+        "architecture": "Butler→Solver(autonomous)→Worker(on-demand)",
+        "total_questions": total,
+        "correct": correct,
+        "accuracy_pct": accuracy,
+        "avg_latency_s": avg_lat,
+        "avg_llm_calls": avg_llm,
+        "avg_worker_calls": avg_w,
+        "avg_input_tokens": avg_in_tok,
+        "avg_output_tokens": avg_out_tok,
+        "avg_total_tokens": avg_tok,
+        "grand_total_tokens": total_tok,
+        "results": results,
+    }
+    with open(args.output, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+
+    print(f"\n{'='*60}")
+    print(f"Evabot 测试结果汇总")
+    print(f"{'='*60}")
+    print(f"  模型              : {MODEL}")
+    print(f"  测试题数          : {total}")
+    print(f"  正确数            : {correct}")
+    print(f"  准确率            : {accuracy}%")
+    print(f"  平均耗时          : {avg_lat}s / 题")
+    print(f"  平均 LLM 调用     : {avg_llm}次 / 题  (含 Solver + Worker)")
+    print(f"  平均 Worker 调用  : {avg_w}次 / 题")
+    print(f"  平均 Token 消耗   : {avg_tok} / 题  (输入{avg_in_tok} + 输出{avg_out_tok})")
+    print(f"  总 Token 消耗     : {total_tok}")
+    print(f"  结果已保存        : {args.output}")
+    print(f"{'='*60}\n")
+
+
+if __name__ == "__main__":
+    main()
