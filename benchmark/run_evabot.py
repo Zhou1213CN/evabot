@@ -96,18 +96,17 @@ SOLVER_SYSTEM = """\
 You are Solver, the strategic orchestration agent in the Evabot multi-agent system.
 
 Your job: answer the user's question by reasoning over multiple web sources that may contain conflicting information.
-The full content of each source is provided in the user message — read them carefully before deciding what to do.
 
 You have two tools:
-1. analyze_source(source_id, aspect) — dispatch a Worker for deeper, focused extraction from one source
+1. analyze_source(source_id, aspect) — dispatch a Worker to extract facts from a specific source
 2. final_answer(answer, reasoning)   — submit your definitive answer
 
 Strategy:
-- First, read all source content provided. If you can determine the answer confidently, call final_answer directly — no Workers needed.
-- Use analyze_source ONLY when a source needs deeper investigation that you cannot do from the snippet alone (e.g., the snippet is truncated and the key fact is likely beyond it).
-- Prefer fewer LLM calls: one direct answer beats three Worker roundtrips if the sources are clear.
-- If the question contains a false premise (the event or entity doesn't exist), say so in final_answer.
-- Call final_answer with a SHORT answer (a number, name, or title, or a brief correction of the false premise).
+- Start by reviewing the available sources (listed in the user message).
+- Decide which sources are worth analyzing and what specific aspect each Worker should focus on.
+- You may call analyze_source multiple times in parallel or sequentially.
+- Once you have enough Worker feedback, call final_answer with a SHORT answer (a number, name, or title).
+- If sources conflict, reason about which is more authoritative or recent before deciding.
 """
 
 WORKER_SYSTEM = """\
@@ -149,7 +148,7 @@ def run_worker(question: str, source: dict, aspect: str) -> tuple:
     snippet = source.get("snippet", "").strip()
     url     = source.get("url", "unknown")
     if not snippet:
-        return "Source is empty.", 0.0, 0, 0
+        return f"Source unavailable (failed to fetch: {url}). Do not retry this source.", 0.0, 0, 0
 
     messages = [
         {"role": "system", "content": WORKER_SYSTEM},
@@ -173,9 +172,9 @@ def run_solver(question: str, sources: list) -> tuple:
     Solver 自主决定策略：可以不派 Worker 直接回答，也可以派多个 Worker。
     返回 (final_answer_str, total_latency_s, worker_calls, solver_llm_calls, total_in_tok, total_out_tok)
     """
-    # 给 Solver 完整的 source 内容，让它自主决定是否需要派 Worker
-    sources_content = "\n\n".join(
-        f"[Source {i+1}] {s.get('url', 'unknown')}\n{s.get('snippet', '').strip()}"
+    # Solver 只看 URL 列表，由它决定派哪些 Worker 去读内容
+    sources_index = "\n".join(
+        f"  Source {i+1}: {s.get('url', 'unknown')}"
         for i, s in enumerate(sources)
     )
 
@@ -183,9 +182,8 @@ def run_solver(question: str, sources: list) -> tuple:
         {"role": "system", "content": SOLVER_SYSTEM},
         {"role": "user", "content": (
             f"Question: {question}\n\n"
-            f"Sources ({len(sources)} total):\n\n{sources_content}\n\n"
-            f"Read the sources above, then call final_answer directly if clear, "
-            f"or use analyze_source for deeper investigation if needed."
+            f"Available sources ({len(sources)} total):\n{sources_index}\n\n"
+            f"Use analyze_source to dispatch Workers as needed, then call final_answer."
         )},
     ]
 
@@ -218,7 +216,6 @@ def run_solver(question: str, sources: list) -> tuple:
         messages.append(msg_dict)
 
         if not msg.tool_calls:
-            # Solver answered in plain text without calling final_answer tool
             return msg.content or "[No answer]", total_latency, worker_calls, solver_llm_calls, total_in_tok, total_out_tok
 
         all_done = False

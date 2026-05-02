@@ -114,6 +114,18 @@ def fetch_url_content(url: str, timeout: int = 15) -> dict:
         return {"url": url, "snippet": snippet, "error": None}
 
     except Exception as e:
+        # 兜底：禁用 SSL 验证重试一次（应对 LibreSSL 兼容性问题）
+        try:
+            resp = requests.get(clean_url, headers=HEADERS, timeout=timeout, verify=False)
+            resp.raise_for_status()
+            html = resp.text
+            text = md(html, strip=["script", "style", "nav", "footer"])
+            lines = [l for l in text.splitlines() if l.strip()]
+            snippet = "\n".join(lines)[:30000]
+            if snippet:
+                return {"url": url, "snippet": snippet, "error": None}
+        except Exception:
+            pass
         return {"url": url, "snippet": "", "error": str(e)}
 
 
@@ -156,13 +168,17 @@ def main():
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # 续跑：读取已有缓存
+    # 续跑：读取已有缓存，只跳过所有 source 均有内容的题目
     existing = {}
     if output_path.exists():
         with open(output_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-            existing = {str(item["id"]): item for item in data}
-        print(f"发现已有缓存 {len(existing)} 条，将跳过已处理的题目。")
+        for item in data:
+            has_content = any(len(s.get("snippet", "")) > 100 for s in item.get("sources", []))
+            if has_content:
+                existing[str(item["id"])] = item
+        skipped = len(data) - len(existing)
+        print(f"发现已有缓存 {len(data)} 条，其中 {len(existing)} 条有内容（跳过），{skipped} 条为空（重新抓取）。")
 
     questions = load_sealqa_dataset()  # 先加载全量，再过滤
 

@@ -28,30 +28,28 @@
 |------|------|
 | `benchmark/fetch_sources.py` | 阶段一：加载 SealQA，按 URL anchor 智能提取相关小节，默认跳过 fast-changing |
 | `benchmark/cached_sources.json` | 共享输入：每道题的网页原文（两个架构读同一份） |
-| `benchmark/run_evabot.py` | 阶段二：Evabot 架构（Solver 读取全部来源后自主决策，按需派发 Worker） |
+| `benchmark/run_evabot.py` | 阶段二：Evabot 架构（Butler → Solver 自主决策 → Worker 按需派发） |
 | `benchmark/run_roma.py` | 阶段三：ROMA 架构（DSPy ChainOfThought 单阶段推理） |
-| `benchmark/evabot_results.json` | Evabot pilot 结果（含 token 和 LLM 调用次数统计） |
-| `benchmark/roma_results.json` | ROMA pilot 结果（含 token 和 LLM 调用次数统计） |
+| `benchmark/evabot_results.json` | Evabot 全量结果（含 token 和 LLM 调用次数统计） |
+| `benchmark/roma_results.json` | ROMA 全量结果（含 token 和 LLM 调用次数统计） |
 
 ---
 
 ## 架构对比
 
-### Evabot（Solver 读源 + 自主决策 + 按需派 Worker）
+### Evabot（Butler → Solver 自主决策 → Worker 按需派发）
 ```
-Butler 把问题交给 Solver（同时携带所有 source 完整内容）
+Butler 把问题交给 Solver
 
 Solver 主循环（最多 8 轮，带 tool_call）：
-  ├── [直接] final_answer(answer, reasoning)
-  │     → 来源清晰时跳过 Worker，直接回答（1 次 LLM 调用）
   ├── analyze_source(source_id, aspect)
   │     → Worker 执行：精读指定来源，返回事实摘要
   │     → 结果以 tool message 回传给 Solver，Solver 可继续追问
   └── final_answer(answer, reasoning)
-        → 基于 Worker 反馈提交答案
+        → 提交最终答案，结束循环
 ```
-- **Solver 拿到题目时已能看到所有 source 内容**，自主决定直答还是派 Worker
-- Worker 调用次数不固定（可为 0，即 Solver 直接回答）
+- **Solver 完全自主**：要不要派 Worker、派几次、关注哪个角度，均由 Solver 的 tool_call 决定
+- Solver 初始只看 URL 列表，Worker 负责读取具体内容（上下文分割）
 - 统计指标：`llm_calls = solver_calls + worker_calls`
 
 ### ROMA（DSPy ChainOfThought 单阶段）
@@ -65,56 +63,65 @@ DSPy ChainOfThought(ConflictAwareQA):
 
 ---
 
-## Pilot 结果（5 题，never-changing，架构修正后）
+## 全量结果（76 题，never/slow-changing）
 
-| 指标 | Evabot（Solver 自主）| ROMA (DSPy CoT) |
-|------|---------------------|-----------------|
-| **准确率** | **80%** (4/5) ✅ | **60%** (3/5) |
-| 平均耗时 | 27.0s / 题 | 9.7s / 题 |
-| **平均 LLM 调用** | **4.6 次 / 题**（Solver+Worker） | **1.0 次 / 题** |
-| 平均 Worker 调用 | 2.0 次 / 题（0~8 不等） | — (单阶段) |
-| **平均 Token 消耗** | **71,251 / 题** | **18,452 / 题** |
-| **Token 消耗比** | **3.86×**（含 Q4 异常值） | 1× (基准) |
+| 指标 | Evabot | ROMA |
+|------|--------|------|
+| **准确率** | **44.7% (34/76)** ✅ | **32.9% (25/76)** |
+| 平均耗时 | 36.9s / 题 | 6.3s / 题 |
+| **平均 LLM 调用** | **5.7 次 / 题** | **1.0 次 / 题** |
+| 平均 Worker 调用 | 2.4 次 / 题 | — |
+| **平均 Token 消耗** | **27,194 / 题** | **10,911 / 题** |
+| **Token 消耗比** | **2.49×** | 1× |
 
-> ⚠️ Q4 为异常值：Evabot 在该题使用了 15 次 LLM 调用、212K tokens 仍答错，严重拉高平均值。剔除 Q4 后 Evabot 平均 token 为 36,474（约 ROMA 的 1.97×）。
+### 题目级别对比
 
-### 逐题详情
+| | 数量 |
+|--|------|
+| Evabot 赢（Evabot ✅ ROMA ❌） | **14 题** |
+| Evabot 输（Evabot ❌ ROMA ✅） | **5 题** |
+| 平局 | 57 题 |
 
-| # | 问题摘要 | 标准答案 | Evabot | ROMA | 备注 |
-|---|---------|---------|--------|------|------|
-| 1 | 2026 FIFA 女足三国主办？ | 2026年不会有女足世界杯 | False premise, no 2026 Women's WC ✅ | 加拿大、墨西哥、美国 ❌ | **架构修正后 Evabot 正确识别 false-premise，ROMA 被题目迷惑** |
-| 2 | Spotify 唯一登顶女艺人 | No one | No female artist… Bad Bunny topped ✅ | None ✅ | Evabot 0 Worker，直接回答（1 次 LLM） |
-| 3 | 占热带雨林四分之一的是？ | Congolian rainforests | Congolian rainforests ✅ | Congolian rainforests ✅ | Evabot 1 次 Worker 辅助确认 |
-| 4 | Trump 和 Biden 共同访问的国家数 | 18 | 17 ❌ | 19 ❌ | 两者均出错；Evabot 消耗 15 LLM 调用、212K token，需加调用上限 |
-| 5 | 原地稳定排序算法名称 | Block sort | Block sort ✅ | Block sort ✅ | Evabot 0 Worker，直接回答（1 次 LLM） |
+> Evabot 用 2.49× token 换来了 **+11.8 个百分点**的准确率提升，且在 76 题中净胜 9 题。
+
+### 按 question_types 分析
+
+| 题型 | Evabot | ROMA | Evabot 优势 |
+|------|--------|------|------------|
+| temporal tracking (6题) | **66.7%** | 50.0% | +16.7% |
+| entity/event disambiguation (45题) | **44.4%** | 26.7% | +17.7% |
+| cross-lingual reasoning (5题) | 40.0% | 40.0% | 持平 |
+| advanced reasoning (55题) | **38.2%** | 32.7% | +5.5% |
+| **false-premise (8题)** | **25.0%** | **12.5%** | +12.5%，**两者共同短板** |
 
 ---
 
 ## 关键发现
 
-### 1. 架构修正：Solver 先读源，再决策
-- 旧架构：Solver 只看 URL 列表，必须派 Worker 才能看到内容 → 强制多 agent
-- 新架构：Solver 初始 context 含所有 source 完整内容，可直接回答（0 Worker）或有针对性地派 Worker 深挖
-- **效果**：Q2、Q5 降为 1 次 LLM 调用；Q1 false-premise 从 ❌ 变 ✅
+### 1. Evabot 多 agent 架构在所有题型上均优于或持平 ROMA
+- 最大优势在 entity/event disambiguation（+17.7%）和 temporal tracking（+16.7%）
+- 多轮 Worker 调用在需要精确定位特定事实的题目上优势明显
+- 仅在 5 题上输给 ROMA，说明 Evabot 架构极少出现"多分析反而答错"的情况
 
-### 2. Evabot 准确率从 60% 提升到 80%，超过 ROMA
-- 架构修正后 Evabot 正确处理了 Q1 false-premise（ROMA 仍然答错）
-- Evabot 在能直接推断的题目上不再浪费 Worker 调用
+### 2. false-premise 是两者共同短板
+- Evabot 25%，ROMA 12.5%，两者都很差
+- 根因：两个架构都缺乏主动验证题目前提的机制
+- 这是下一步优化的核心方向
 
-### 3. Q4 存在"失控"问题（最高优先级待修复）
-- Trump/Biden 共同访问国家数：Evabot 用了 15 次 LLM 调用、212K tokens，仍得出错误答案 17
-- 根因：需跨两页 Wikipedia 交叉统计，Solver 反复派 Worker 却无法收敛
-- **后续**：需要为 MAX_SOLVER_ROUNDS 设置更严格的上限，并加入 early-stop 机制
+### 3. Runaway 问题已解决，根因是 source 为空
+- 早期实验中出现 15 次 LLM 调用的失控现象
+- 根因：macOS LibreSSL SSL 兼容性问题导致 fetch 静默失败，source 为空时 Solver 反复派 Worker 重试
+- **已修复**：fetch 加 SSL fallback + 续跑逻辑区分空/有内容缓存；Worker 遇到空 source 明确返回"不可用，勿重试"
 
-### 4. LLM 调用次数是关键差异指标
-- ROMA：固定 1 次/题
-- Evabot：平均 4.6 次/题（最低 1 次，Q4 高达 15 次）
-- Token 消耗和延迟均与 LLM 调用次数正相关
-- 控制 Worker 调用次数 = 控制成本的核心杠杆
+### 4. Source 截断影响 Worker 提取精度
+- 所有 source 截断至 30k 字符，计数类题目（如"两人共同访问的国家数"）的完整列表可能被截断
+- Worker 只能提取截断范围内的信息，导致计数偏差
+- 这是当前架构下影响 advanced reasoning 类题目准确率的主要瓶颈
 
-### 5. fast-changing 题目应全部剔除（已实现）
-- 35 道 fast-changing 题目依赖实时数据，任何模型均无法从缓存 Wikipedia 答对
-- 两个 runner 默认过滤，`--include-fast-changing` 可手动开启
+### 5. Token 效率
+- Evabot 平均 5.7 次 LLM 调用 / 题，ROMA 固定 1 次
+- 多 agent 的信息质量优势以约 2.49× token 为代价
+- 控制 Worker 调用次数是降低成本的核心杠杆
 
 ### 6. 评分器三级匹配（稳定）
 | 优先级 | 规则 | 示例 |
@@ -134,7 +141,7 @@ pip install datasets requests markdownify beautifulsoup4 openai dspy
 # 2. 抓取 76 道有效题目（默认跳过 fast-changing，支持断点续跑）
 python benchmark/fetch_sources.py
 
-# 3. 运行 Evabot（Solver 读源后自主决策架构）
+# 3. 运行 Evabot（Butler → Solver 自主决策架构）
 deepseek_key=<YOUR_KEY> python benchmark/run_evabot.py
 
 # 4. 运行 ROMA（DSPy ChainOfThought）
@@ -145,13 +152,13 @@ deepseek_key=<YOUR_KEY> python benchmark/run_evabot.py --limit 5
 deepseek_key=<YOUR_KEY> python benchmark/run_roma.py --limit 5
 ```
 
-> ⚠️ 全量 76 题预计耗时：Evabot ~60min，ROMA ~20min。建议分别后台运行。
+> ⚠️ 全量 76 题实测耗时：Evabot ~47min，ROMA ~8min。
 
 ---
 
 ## 后续计划
 
-- [ ] 为 Evabot 加入 early-stop / 最大 Worker 调用上限，解决 Q4 类失控问题
-- [ ] 跑全量 76 题，获得统计显著的准确率与 Token 消耗对比
-- [ ] 按 question_types 分组分析（advanced_reasoning / entity_disambiguation / false_premise / temporal_tracking）
+- [ ] 针对 false-premise 题型优化：框架层面加入前提验证机制
+- [ ] 解决 source 截断问题：计数类题目需要完整列表，考虑动态扩展 source 窗口
+- [ ] 控制 Worker 调用上限，在精度和 token 效率之间取得更好平衡
 - [ ] 探索 ROMA 优化方向：multi-hop 场景下拆分来源分别推理
